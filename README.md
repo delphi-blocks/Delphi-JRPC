@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo-for-light.png" alt="Delphi-JRPC" width="400" height="400" />
+</p>
+
 # Delphi-JRPC: JSON-RPC 2.0 Library for Delphi
 
 A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI and the [Neon](https://github.com/paolo-rossi/delphi-neon) serialization library.
