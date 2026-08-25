@@ -21,11 +21,6 @@ The point of this demo is to show how little you need to write. Four rules keep 
    on its own, and connections are interchangeable.
 4. **Errors are the five standard JSON-RPC codes.** No application code range.
 
-What this costs, so it is a choice and not an accident: a slow command blocks its
-connection, and the client cannot be told anything it did not ask for. When either starts
-to hurt, the fuller design — sessions, async jobs, progress and output pushes,
-application error codes — is drafted at
-<https://claude.ai/code/artifact/7faeaad1-85b9-4256-9d19-fa13bdd81659>.
 
 ---
 
@@ -272,27 +267,7 @@ hand it (the request frees it), so never free that object yourself.
 Parse the answer with `TJRPCResponse.CreateFromJson` (or `TJRPCMessages.CreateFromJson`
 when batches are in play) and check for an `error` member before reading `result`.
 
-## 6. Running the demo
-
-```
-BuildTCPCommands.bat                        REM builds Server.exe and Client.exe
-Demos\TCPCommands\Win32\Debug\Server.exe     REM listens on 8090, or Server.exe <port>
-Demos\TCPCommands\Win32\Debug\Client.exe     REM Connect, then press a command button
-```
-
-The server starts listening as soon as its window opens and logs every line in and out.
-The client has one button per command, plus a **send raw** box for typing malformed JSON
-by hand to see `-32700`, `-32600` and `-32601` come back.
-
-`Test-Protocol.ps1` drives the server over a real socket with no GUI: it starts
-`Server.exe` on port 8099, exercises all five commands, all five error codes and the
-framing rules (notification, keepalive, batch, second connection), then shuts it down.
-
-```
-pwsh -NoProfile -File Demos\TCPCommands\Test-Protocol.ps1
-```
-
-## 7. Adding a command
+## 6. Adding a command
 
 1. Add a method to an API class, with `[JRPCMethod('name')]` and a `[JRPCParam]` per argument.
 2. Return whatever it produces — a string, a number, a class, an array of classes. Neon
