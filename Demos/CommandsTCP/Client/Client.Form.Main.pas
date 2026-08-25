@@ -13,7 +13,7 @@
 /// <summary>
 ///   The client half: builds a JSON-RPC request with TJRPCRequest, writes it
 ///   as one line, reads one line back. Calls are synchronous - write, read,
-///   done - which is the whole point of this demo. See PROTOCOL.md.
+///   done - which is the whole point of this demo. See README.md.
 /// </summary>
 unit Client.Form.Main;
 

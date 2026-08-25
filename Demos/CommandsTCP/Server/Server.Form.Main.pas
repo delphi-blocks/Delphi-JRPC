@@ -13,7 +13,7 @@
 /// <summary>
 ///   The transport: an Indy TCP server that reads one JSON-RPC message per
 ///   line, hands it to TJRPCServer.ProcessRequest and writes the answer back.
-///   That is the whole server - the commands live in Server.Api.Commands.
+///   That is the whole server - the commands live in Server.Protocol.Api.
 /// </summary>
 unit Server.Form.Main;
 
@@ -29,7 +29,7 @@ uses
   JRPC.Server;
 
 const
-  /// <summary>PROTOCOL.md: max message size. Indy defaults to 16 KiB.</summary>
+  /// <summary>README.md: max message size. Indy defaults to 16 KiB.</summary>
   MAX_LINE_LENGTH = 1024 * 1024;
   DEFAULT_PORT = 11099;
 
@@ -212,6 +212,41 @@ var
   LLine: string;
   LResponse: string;
 begin
+  // ---------------------------------------------------------------------------
+  //  *** THREAD SAFETY ***
+  //
+  //  Read this before turning the demo into something real!
+  //
+  //  Indy gives every connection its own thread, and OnExecute runs on it. So
+  //  this method, and every command it ends up calling, runs concurrently with
+  //  the other connections. In a real server that means:
+  //
+  //  - No global objects, singletons or class vars holding mutable state
+  //    without a lock. The library creates a fresh API instance per request,
+  //    so instance fields are private to the call - anything wider is shared.
+  //
+  //  - No datasets, no TFDConnection, no ADO/UniDAC objects dropped on the form
+  //    or on a shared data module. Those components are not thread-safe: two
+  //    connections walking the same query corrupt each other. Give every
+  //    request its own connection (or take one from a pool) and free it when
+  //    the command returns.
+  //
+  //  - No VCL from here. Touching a control off the main thread is undefined
+  //    behaviour; Log() below goes through TThread.Queue for exactly that
+  //    reason, and Queue rather than Synchronize so stopping the server cannot
+  //    deadlock against a thread waiting on the main one.
+  //
+  //  - Shared caches, counters, lists and files need a TCriticalSection (or a
+  //    lock-free equivalent), and so does writing to the same connection from
+  //    more than one place.
+  //
+  //  What IS safe here: TJRPCServer itself. It keeps no per-request state - the
+  //  context, the garbage collector and the API instances are all created and
+  //  released inside ProcessRequest - so one instance serves every connection.
+  //  The commands in this demo are pure functions over their parameters, which
+  //  is why it needs no lock at all.
+  // ---------------------------------------------------------------------------
+
   LLine := AContext.Connection.IOHandler.ReadLn(IndyTextEncoding_UTF8);
 
   if LLine.Trim = '' then

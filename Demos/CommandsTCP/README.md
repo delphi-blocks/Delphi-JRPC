@@ -1,12 +1,29 @@
 # TCP Commands Protocol
 
-The wire protocol for the `Demos/TCPCommands` client/server pair: the client sends a
+The wire protocol for the `Demos/CommandsTCP` client/server pair: the client sends a
 JSON-RPC 2.0 request over a TCP connection, the server runs it and answers. That is the
 whole protocol.
 
 - Transport: TCP (Indy `TIdTCPServer` / `TIdTCPClient`)
 - Payload: JSON-RPC 2.0, dispatched by `TJRPCServer.ProcessRequest`
 - Encoding: UTF-8, no BOM
+
+## The demo
+
+```
+Demos/CommandsTCP/
+  Server/  Server.Form.Main.pas      the Indy transport - the whole server
+           Server.Protocol.Api.pas   the five commands
+  Client/  Client.Form.Main.pas      one button per command
+```
+
+Build both projects with `BuildTCPCommands.bat` in the repository root, then run
+`Server\Win32\Debug\Server.exe` and `Client\Win32\Debug\Client.exe`.
+
+The server starts listening on **port 11099** as soon as its window opens
+(`Server.exe <port>` overrides it) and logs every line in and out. The client has one
+button per command, editable arguments, and a **send raw** box for typing malformed JSON
+by hand to watch `-32700`, `-32600` and `-32601` come back.
 
 ## Design rules
 
@@ -238,6 +255,13 @@ One `TJRPCServer` instance serves every connection. It holds no per-request stat
 context, the garbage collector and the API instances are all created and released inside
 `ProcessRequest` — so no lock is needed as long as the commands themselves are
 thread-safe.
+
+That last clause carries all the weight: Indy runs `OnExecute` on a thread per
+connection, so every command runs concurrently with the others. This demo's commands are
+pure functions over their parameters, which is why it gets away with no locking at all —
+a real server with a database, a cache or any shared state does not. The rules are spelled
+out in the `THREAD SAFETY` comment at the top of `TServerForm.tcpServerExecute`; read it
+before adding a command that touches anything outside its own arguments.
 
 ### The client call
 

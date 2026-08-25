@@ -14,7 +14,13 @@
 ///   The commands the TCP server exposes. Every command is a plain Delphi
 ///   method: [JRPCMethod] gives it its JSON-RPC name, [JRPCParam] names its
 ///   arguments, and the result - a string, an integer, an object, an array of
-///   objects - is serialized by Neon. See PROTOCOL.md.
+///   objects - is serialized by Neon. See README.md.
+///
+///   Every command below runs on an Indy connection thread, concurrently with
+///   the other connections: the commands here are pure functions over their
+///   parameters, which is what keeps the server lock-free. Before reaching for
+///   a dataset, a singleton or a class var, read the thread-safety note in
+///   TServerForm.tcpServerExecute.
 /// </summary>
 unit Server.Protocol.Api;
 
@@ -173,7 +179,7 @@ end;
 initialization
   GStartedAt := Now;
 
-  // Camel: TServerInfo.CpuCount is serialized as "cpuCount", per PROTOCOL.md.
+  // Camel: TServerInfo.CpuCount is serialized as "cpuCount", per README.md.
   // TBasicApi returns plain strings, so its configuration does not matter.
   TJRPCRegistry.Instance.RegisterClass(TBasicApi);
   TJRPCRegistry.Instance.RegisterClass(TSysApi, TNeonConfiguration.Camel);
