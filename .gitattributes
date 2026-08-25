@@ -12,3 +12,8 @@
 
 # Docs: LF
 *.md text eol=lf
+
+# Binary assets: never line-ending normalize
+*.ico binary
+*.png binary
+*.jpg binary

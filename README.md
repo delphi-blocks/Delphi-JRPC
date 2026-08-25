@@ -28,7 +28,6 @@ A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI 
 | **JRPC.Invoker** | Maps JSON-RPC requests to Delphi method calls using RTTI and attributes. |
 | **JRPC.Classes** | Supporting utilities: garbage collection, context management, route matching. |
 | **JRPC.Server** | Transport-agnostic server component (`TJRPCServer`) that parses, dispatches and answers requests, including batches. |
-| **Logify** | The logging backend for the [PERF] TStopwatch instrumentation (via the global `Logger`). Register an adapter (`TLoggerAdapterRegistry.Instance.RegisterFactory(...)`) to see the timing logs. |
 
 ## 🛠️ Quick Start
 

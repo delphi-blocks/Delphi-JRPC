@@ -31,6 +31,9 @@ type
     [Test] procedure TestProcessRequestBatchWithInvalidElement;
     [Test] procedure TestProcessRequestMethodNotFound;
     [Test] procedure TestProcessRequestInvalidParams;
+    [Test] procedure TestProcessRequestMissingParam;
+    [Test] procedure TestProcessRequestWholeParamsObject;
+    [Test] procedure TestProcessRequestEnumParam;
     [Test] procedure TestProcessRequestParseError;
     [Test] procedure TestProcessRequestInvalidRequestScalar;
     [Test] procedure TestProcessRequestNullIdRoundTrip;
@@ -51,7 +54,7 @@ type
 implementation
 
 uses
-  System.Classes,
+  System.Classes, System.Generics.Collections,
   Logify,
   Logify.Adapter.Buffer,
 
@@ -177,6 +180,7 @@ begin
     LResponse := LServer.ProcessRequest(
       '{"jsonrpc":"2.0","id":1,"method":"math/sum","params":{"a":2,"b":40}}');
     Assert.AreEqual('42', GetResultValue(LResponse));
+    Assert.IsTrue(LResponse.Contains('"id":1'), 'the id is echoed: ' + LResponse);
   finally
     LServer.Free;
   end;
@@ -308,6 +312,56 @@ begin
     LResponse := LServer.ProcessRequest(
       '{"jsonrpc":"2.0","id":9,"method":"math/sum","params":{"a":"x","b":1}}');
     Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LResponse));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestMissingParam;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  // "b" is not supplied at all: invalid params, like a wrongly typed one.
+  LServer := TJRPCServer.Create(nil);
+  try
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":10,"method":"math/sum","params":{"a":5}}');
+    Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LResponse));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestWholeParamsObject;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  // [JRPCParams]: the whole params object is deserialized into one argument.
+  LServer := TJRPCServer.Create(nil);
+  try
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":13,"method":"greet/hello",' +
+      '"params":{"Salutation":"Hello","Name":"World"}}');
+    Assert.AreEqual('Hello, World!', GetResultValue(LResponse));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestEnumParam;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  // Enums travel by name.
+  LServer := TJRPCServer.Create(nil);
+  try
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":14,"method":"math/apply",' +
+      '"params":{"op":"opMultiply","a":6,"b":7}}');
+    Assert.AreEqual('42', GetResultValue(LResponse));
   finally
     LServer.Free;
   end;
