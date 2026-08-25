@@ -1,0 +1,14 @@
+# Normalize line endings for the whole repository
+* text=auto
+
+# Delphi sources: CRLF on Windows checkouts
+*.pas text eol=crlf
+*.dpr text eol=crlf
+*.dproj text eol=crlf
+*.dpk text eol=crlf
+*.inc text eol=crlf
+*.dfm text eol=crlf
+*.bat text eol=crlf
+
+# Docs: LF
+*.md text eol=lf
