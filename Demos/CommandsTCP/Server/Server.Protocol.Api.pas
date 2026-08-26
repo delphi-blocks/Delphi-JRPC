@@ -64,10 +64,6 @@ type
     property Modified: string read FModified write FModified;
   end;
 
-  /// <summary>
-  ///   No [JRPCPath]: the [JRPCMethod] names are the full JSON-RPC method
-  ///   names, so these answer "ping" and "echo" with no prefix.
-  /// </summary>
   TBasicApi = class
   public
     [JRPCMethod('ping')]
@@ -75,41 +71,22 @@ type
 
     [JRPCMethod('echo')]
     function Echo([JRPCParam('text')] const text: string): string;
-  end;
 
-  /// <summary>[JRPCPath('sys')] + [JRPCMethod('info')] answers "sys/info".</summary>
-  [JRPCPath('sys')]
-  TSysApi = class
-  public
-    [JRPCMethod('info')]
+    [JRPCMethod('sys/info')]
     function Info: TServerInfo;
 
-    [JRPCMethod('time')]
+    [JRPCMethod('sys/time')]
     function Time: string;
-  end;
 
-  /// <summary>The command that actually carries information both ways.</summary>
-  [JRPCPath('dir')]
-  TDirApi = class
-  public
-    [JRPCMethod('list')]
+    [JRPCMethod('dir/list')]
     function List([JRPCParam('path')] const path: string;
       [JRPCParam('mask')] const mask: string): TArray<TDirEntry>;
   end;
-
-/// <summary>Formats a local TDateTime as an ISO-8601 UTC timestamp.</summary>
-function ToISO8601Utc(const AValue: TDateTime): string;
 
 implementation
 
 var
   GStartedAt: TDateTime;
-
-function ToISO8601Utc(const AValue: TDateTime): string;
-begin
-  Result := FormatDateTime('yyyy-mm-dd"T"hh:nn:ss.zzz"Z"',
-    TTimeZone.Local.ToUniversalTime(AValue));
-end;
 
 { TBasicApi }
 
@@ -123,9 +100,7 @@ begin
   Result := text;
 end;
 
-{ TSysApi }
-
-function TSysApi.Info: TServerInfo;
+function TBasicApi.Info: TServerInfo;
 begin
   // The result is handed to the request garbage collector: it is freed once
   // the response has been serialized, so nothing is freed here.
@@ -137,14 +112,12 @@ begin
   Result.UptimeSec := SecondsBetween(Now, GStartedAt);
 end;
 
-function TSysApi.Time: string;
+function TBasicApi.Time: string;
 begin
-  Result := ToISO8601Utc(Now);
+  Result := DateToISO8601(Now);
 end;
 
-{ TDirApi }
-
-function TDirApi.List(const path: string; const mask: string): TArray<TDirEntry>;
+function TBasicApi.List(const path: string; const mask: string): TArray<TDirEntry>;
 var
   LRec: TSearchRec;
   LEntry: TDirEntry;
@@ -166,7 +139,7 @@ begin
       LEntry := TDirEntry.Create;
       LEntry.Name := LRec.Name;
       LEntry.Size := LRec.Size;
-      LEntry.Modified := ToISO8601Utc(LRec.TimeStamp);
+      LEntry.Modified := DateToISO8601(LRec.TimeStamp);
 
       // The items are collected too: the garbage collector walks the array.
       Result := Result + [LEntry];
@@ -179,10 +152,6 @@ end;
 initialization
   GStartedAt := Now;
 
-  // Camel: TServerInfo.CpuCount is serialized as "cpuCount", per README.md.
-  // TBasicApi returns plain strings, so its configuration does not matter.
-  TJRPCRegistry.Instance.RegisterClass(TBasicApi);
-  TJRPCRegistry.Instance.RegisterClass(TSysApi, TNeonConfiguration.Camel);
-  TJRPCRegistry.Instance.RegisterClass(TDirApi, TNeonConfiguration.Camel);
+  TJRPCRegistry.Instance.RegisterClass(TBasicApi, TNeonConfiguration.Camel);
 
 end.
