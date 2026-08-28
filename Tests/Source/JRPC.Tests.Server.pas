@@ -32,6 +32,7 @@ type
     [Test] procedure TestProcessRequestMethodNotAStringIsInvalidRequest;
     [Test] procedure TestProcessRequestMethodErrorCarriesNoRTLDetail;
     [Test] procedure TestProcessRequestEmptyMethodIsMethodNotFound;
+    [Test] procedure TestProcessRequestParamErrorsCarryTheirReason;
     [Test] procedure TestProcessRequestParamsNotStructuredIsInvalidParams;
     [Test] procedure TestProcessRequestParamsNullIsTreatedAsAbsent;
     [Test] procedure TestProcessRequestNotificationBadParamsNoResponse;
@@ -334,6 +335,97 @@ begin
     // for a method that does not exist - not an Invalid Request.
     Assert.AreEqual(JRPC_METHOD_NOT_FOUND, ErrorCodeOf(LServer.ProcessRequest(
       '{"jsonrpc":"2.0","id":1,"method":""}')));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestParamErrorsCarryTheirReason;
+
+  function ErrorDataOf(const AJSON: string): string;
+  var
+    LObj: TJSONObject;
+    LErr: TJSONValue;
+  begin
+    Result := '';
+    LObj := ParseObject(AJSON);
+    if Assigned(LObj) then
+    try
+      LErr := LObj.GetValue('error');
+      if Assigned(LErr) and (LErr is TJSONObject) then
+      begin
+        LErr := TJSONObject(LErr).GetValue('data');
+        if Assigned(LErr) then
+          Result := LErr.Value;
+      end;
+    finally
+      LObj.Free;
+    end;
+  end;
+
+  function ErrorMessageOf(const AJSON: string): string;
+  var
+    LObj: TJSONObject;
+    LErr: TJSONValue;
+  begin
+    Result := '';
+    LObj := ParseObject(AJSON);
+    if Assigned(LObj) then
+    try
+      LErr := LObj.GetValue('error');
+      if Assigned(LErr) and (LErr is TJSONObject) then
+        Result := TJSONObject(LErr).GetValue('message').Value;
+    finally
+      LObj.Free;
+    end;
+  end;
+
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // The invoker works out exactly which parameter was wrong; that reason used
+    // to be replaced wholesale by the flat "Invalid method parameters.", so the
+    // caller was told the parameters were bad but never which or why. It now
+    // travels in "data", where the spec puts additional information, while
+    // "message" stays the one-liner clients can group on.
+
+    // a named parameter the request never sent
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":"math/sum","params":{"a":5}}');
+    Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LResponse));
+    Assert.AreEqual(SJRPCInvalidMethodParameters, ErrorMessageOf(LResponse),
+      'the message stays stable');
+    Assert.AreEqual(Format(SJRPCParamNotFound, ['b']), ErrorDataOf(LResponse),
+      'data names the missing parameter');
+
+    // too few positional parameters
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":2,"method":"math/sum","params":[1]}');
+    Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LResponse));
+    Assert.AreEqual(Format(SJRPCParamIndexNotFound, [1, 1]), ErrorDataOf(LResponse),
+      'data reports the index and the count');
+
+    // a parameter of the wrong JSON type
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":3,"method":"math/sum","params":{"a":"x","b":1}}');
+    Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LResponse));
+    Assert.AreEqual(Format(SJRPCInvalidParamForString, ['a']), ErrorDataOf(LResponse),
+      'data names the parameter and the offending type');
+
+    // the method takes parameters and none were sent: Invalid params, and the
+    // reason is the truth rather than the old internal "Unknown params type"
+    LResponse := LServer.ProcessRequest('{"jsonrpc":"2.0","id":4,"method":"math/sum"}');
+    Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LResponse));
+    Assert.AreEqual(Format(SJRPCParamsRequired, ['a']), ErrorDataOf(LResponse));
+
+    // a call that is fine still carries no error at all
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":5,"method":"math/sum","params":{"a":1,"b":1}}');
+    Assert.AreEqual('2', GetResultValue(LResponse));
+    Assert.AreEqual('', ErrorDataOf(LResponse));
   finally
     LServer.Free;
   end;

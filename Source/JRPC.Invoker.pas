@@ -30,17 +30,24 @@ uses
 
 type
   /// <summary>
-  ///   This exception is raised when an error occurs during the invocation of a JRPC method. 
+  ///   This exception is raised when an error occurs during the invocation of a JRPC method.
   ///   It provides the standard information required by the JSON-RPC specification.
   /// </summary>
-  EJRPCInvokerError = class(Exception)
-  private
-    FCode: Integer;
-    FData: string;
+  /// <remarks>
+  ///   Descends from EJRPCException so the code and the detail it is built with
+  ///   reach the client: they are read straight out by
+  ///   TJRPCError.CreateFromException. It used to descend from Exception, which
+  ///   meant it was translated away before anyone looked at either, and both
+  ///   properties were dead.
+  /// </remarks>
+  EJRPCInvokerError = class(EJRPCException)
   public
-    property Code: Integer read FCode;
-    property Data: string read FData;
-
+    /// <param name="AMessage">
+    ///   The JSON-RPC "message": a stable one-liner clients can group on.
+    /// </param>
+    /// <param name="AData">
+    ///   The JSON-RPC "data": precisely which parameter was wrong and why.
+    /// </param>
     constructor Create(ACode: Integer; const AMessage: string; const AData: string = '');
   end;
 
@@ -105,25 +112,30 @@ begin
   if AValue is TJSONNumber then
   begin
     if not (AParam.ParamType.TypeKind in [tkInteger, tkFloat, tkInt64]) then
-      raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, Format(SJRPCInvalidParamForNumber, [AParam.Name]));
+      raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, SJRPCInvalidMethodParameters,
+        Format(SJRPCInvalidParamForNumber, [AParam.Name]));
   end
   else if AValue is TJSONString then
   begin
     if not (AParam.ParamType.TypeKind in [tkString, tkWChar, tkLString, tkWString, tkUString]) then
-      raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, Format(SJRPCInvalidParamForString, [AParam.Name]));
+      raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, SJRPCInvalidMethodParameters,
+        Format(SJRPCInvalidParamForString, [AParam.Name]));
   end
   else if AValue is TJSONObject then
   begin
     if not (AParam.ParamType.TypeKind in [tkClass, tkRecord, tkInterface]) then
-      raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, Format(SJRPCInvalidParamForObject, [AParam.Name]));
+      raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, SJRPCInvalidMethodParameters,
+        Format(SJRPCInvalidParamForObject, [AParam.Name]));
   end
   else if AValue is TJSONArray then
   begin
     if not (AParam.ParamType.TypeKind in [tkArray, tkDynArray]) then
-      raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, Format(SJRPCInvalidParamForArray, [AParam.Name]));
+      raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, SJRPCInvalidMethodParameters,
+        Format(SJRPCInvalidParamForArray, [AParam.Name]));
   end
   else
-    raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, Format(SJRPCInvalidParam, [AParam.Name]));
+    raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, SJRPCInvalidMethodParameters,
+        Format(SJRPCInvalidParam, [AParam.Name]));
 end;
 
 constructor TJRPCInvoker.Create(AContext: TJRPCInvokerContext);
@@ -189,6 +201,28 @@ begin
     LArgs := RequestToRttiParams(LMethod);
     FContext.Garbage.Add(LArgs);
   except
+    on E: EJRPCInvokerError do
+    begin
+      // E knows its JSON-RPC code and, in Data, exactly which parameter was
+      // wrong and why. Both used to be thrown away here: everything alike was
+      // rewritten into a bare EJRPCInvalidParamsError, leaving the caller with
+      // "Invalid method parameters." and nothing to act on.
+      //
+      // An internal inconsistency is already a well-formed EJRPCException and
+      // goes out as it is, keeping its own code.
+      if E.Code <> JRPC_INVALID_PARAMS then
+        raise;
+
+      // A parameter error keeps the exception class that has always escaped
+      // Invoke - a caller may well be catching EJRPCInvalidParamsError - and
+      // carries the reason across into "data".
+      var LInvalidParams := EJRPCInvalidParamsError.Create(SJRPCInvalidMethodParameters);
+      LInvalidParams.Data := E.Data;
+      Exception.RaiseOuterException(LInvalidParams);
+    end;
+  else
+    // Anything else (a Neon conversion failure, say) has no reason fit to send,
+    // so it becomes the generic Invalid params with no detail.
     Exception.RaiseOuterException(EJRPCInvalidParamsError.Create(SJRPCInvalidMethodParameters));
   end;
   Logger.LogDebug('[PERF] JRPC [%s] RequestToRttiParams: %d ms', [FContext.Request.Method, LStopwatch.ElapsedMilliseconds]);
@@ -321,8 +355,12 @@ begin
       case FContext.Request.ParamsType of
         TJRPCParamsType.ByPos:
         begin
+          // CreateFmt here would be the inherited Exception constructor, which
+          // never runs the one below and leaves Code at 0 - harmless while the
+          // code was thrown away, not now that it is reported.
           if LParamIndex >= (FContext.Request.Params as TJSONArray).Count then
-            raise EJRPCInvokerError.CreateFmt(SJRPCParamIndexNotFound, [LParamIndex, (FContext.Request.Params as TJSONArray).Count]);
+            raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, SJRPCInvalidMethodParameters,
+              Format(SJRPCParamIndexNotFound, [LParamIndex, (FContext.Request.Params as TJSONArray).Count]));
 
           LParamJSON := (FContext.Request.Params as TJSONArray).Items[LParamIndex];
         end;
@@ -330,9 +368,20 @@ begin
         TJRPCParamsType.ByName:
         begin
           if not (FContext.Request.Params as TJSONObject).TryGetValue(GetParamName(LParam), LParamJSON) then
-            raise EJRPCInvokerError.CreateFmt(SJRPCParamNotFound, [GetParamName(LParam)]);
+            raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, SJRPCInvalidMethodParameters,
+              Format(SJRPCParamNotFound, [GetParamName(LParam)]));
         end;
+
+        // The method declares parameters and the request carried none. This is
+        // Invalid params, not an internal error: it used to be reported as
+        // JRPC_INTERNAL_ERROR under "Unknown params type", which said nothing
+        // true about the request - masked only because the blanket wrap below
+        // rewrote it to -32602 anyway.
+        TJRPCParamsType.Null:
+          raise EJRPCInvokerError.Create(JRPC_INVALID_PARAMS, SJRPCInvalidMethodParameters,
+            Format(SJRPCParamsRequired, [GetParamName(LParam)]));
       else
+        // Genuinely unreachable: ParamsType has no fourth value.
         raise EJRPCInvokerError.Create(JRPC_INTERNAL_ERROR, SJRPCUnknownParamsType);
       end;
 

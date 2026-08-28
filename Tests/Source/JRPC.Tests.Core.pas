@@ -65,6 +65,8 @@ type
     [Test] procedure TestErrorCreateFromGenericException;
     [Test] procedure TestErrorCreateFromGenericExceptionExposedWhenEnabled;
     [Test] procedure TestErrorProtocolExceptionsKeepTheirMessage;
+    [Test] procedure TestErrorCarriesExceptionData;
+    [Test] procedure TestJRPCExceptionKeepsAConstructorChosenCode;
     [Test] procedure TestErrorSerializeNullId;
     [Test] procedure TestErrorClone;
 
@@ -735,6 +737,73 @@ begin
     end;
   finally
     TJRPCError.ExposeExceptionDetails := False;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestErrorCarriesExceptionData;
+var
+  LException: EJRPCInvalidParamsError;
+  LError: TJRPCError;
+begin
+  // A JSON-RPC exception can now carry a detail for the "data" member, so a
+  // precise reason travels with the stable message instead of replacing it.
+  LException := EJRPCInvalidParamsError.Create(SJRPCInvalidMethodParameters);
+  try
+    LException.Data := 'Parameter "b" not found';
+    LError := TJRPCError.CreateFromException(LException, 1);
+    try
+      Assert.AreEqual(JRPC_INVALID_PARAMS, Integer(LError.Error.Code));
+      Assert.AreEqual(SJRPCInvalidMethodParameters, string(LError.Error.Message));
+      Assert.AreEqual('Parameter "b" not found', LError.Error.Data.AsString);
+    finally
+      LError.Free;
+    end;
+  finally
+    LException.Free;
+  end;
+
+  // ...and an exception that carries none leaves the member out entirely.
+  LException := EJRPCInvalidParamsError.Create(SJRPCInvalidMethodParameters);
+  try
+    LError := TJRPCError.CreateFromException(LException, 1);
+    try
+      Assert.IsTrue(LError.Error.Data.IsEmpty, 'no empty data member is emitted');
+    finally
+      LError.Free;
+    end;
+  finally
+    LException.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestJRPCExceptionKeepsAConstructorChosenCode;
+var
+  LException: EJRPCException;
+begin
+  // EJRPCException.AfterConstruction runs after the constructor body, so it
+  // only defaults the code now - a descendant that already chose one keeps it,
+  // which is what lets EJRPCInvokerError report the code it was built with.
+  LException := EJRPCException.Create('plain');
+  try
+    Assert.AreEqual(JRPC_INTERNAL_ERROR, LException.Code, 'the default still applies');
+  finally
+    LException.Free;
+  end;
+
+  // The descendants that set their code in their own AfterConstruction are
+  // unaffected, since theirs runs after the base one.
+  LException := EJRPCParseError.Create('x');
+  try
+    Assert.AreEqual(JRPC_PARSE_ERROR, LException.Code);
+  finally
+    LException.Free;
+  end;
+
+  LException := EJRPCMethodNotFoundError.Create('x');
+  try
+    Assert.AreEqual(JRPC_METHOD_NOT_FOUND, LException.Code);
+  finally
+    LException.Free;
   end;
 end;
 

@@ -73,6 +73,7 @@ resourcestring
   SJRPCErrorCallingApiMethod = 'Error calling Api method [%s.%s]';
   SJRPCParamIndexNotFound = 'Parameter with index "%d" not found (only %d parameters available)';
   SJRPCParamNotFound = 'Parameter "%s" not found';
+  SJRPCParamsRequired = 'The method expects parameter "%s" but the request carries no params';
   SJRPCUnknownParamsType = 'Unknown params type';
 
 type
@@ -82,6 +83,7 @@ type
   EJRPCException = class(Exception)
   protected
     FCode: Integer;
+    FData: string;
   public
     procedure AfterConstruction; override;
 
@@ -91,6 +93,18 @@ type
     ///   The JSON-RPC error code.
     /// </summary>
     property Code: Integer read FCode;
+
+    /// <summary>
+    ///   Optional detail for the JSON-RPC "data" member of the error object.
+    /// </summary>
+    /// <remarks>
+    ///   Use it to say precisely what went wrong while "message" stays the
+    ///   stable one-liner a client can group on: the spec reserves "data" for
+    ///   exactly this. Empty by default, in which case no "data" is emitted.
+    ///   Whatever goes in here is sent to the client verbatim, so it must be
+    ///   text the library wrote on purpose - never an RTL message.
+    /// </remarks>
+    property Data: string read FData write FData;
   end;
 
   /// <summary>
@@ -1580,7 +1594,13 @@ end;
 procedure EJRPCException.AfterConstruction;
 begin
   inherited;
-  FCode := JRPC_INTERNAL_ERROR;
+  // Only a default. A descendant whose constructor already chose a code keeps
+  // it: AfterConstruction runs after the constructor body, so an unconditional
+  // assignment here would stamp JRPC_INTERNAL_ERROR over it. The descendants
+  // that set their code in their own AfterConstruction are unaffected, since
+  // theirs runs after this one.
+  if FCode = 0 then
+    FCode := JRPC_INTERNAL_ERROR;
 end;
 
 function EJRPCException.ToJSON: string;
@@ -2026,6 +2046,10 @@ begin
     Result.Id := AId;
     Result.Error.Code := EJRPCException(E).Code;
     Result.Error.Message := E.Message;
+    // "data" is emitted only when the exception actually carried a detail, so
+    // the member stays absent rather than turning up empty.
+    if EJRPCException(E).Data <> '' then
+      Result.Error.Data := EJRPCException(E).Data;
   end
   else if E is EJSONParseException then
   begin
