@@ -1176,6 +1176,27 @@ begin
     raise EJRPCInvalidParamsError.Create(SJRPCInvalidParamsStructure);
 end;
 
+// Drops the "params" member from a serialized Request/Notification that carries
+// no parameters. TJRPCMethod keeps a live TJSONNull in FParams rather than nil
+// (so ParamsType, AddNamedParam and friends have something to work with), which
+// means Neon's IncludeIf.NotNull never fires and an omitted params went out as
+// "params": null on every param-less message this library sent.
+//
+// JSON-RPC 2.0 wants the member simply absent: null is neither an Array nor an
+// Object, and a peer that validates strictly is entitled to answer -32602. Our
+// own parser accepts it on the way in (see AssignJRPCParams) - be liberal in
+// what you accept, strict in what you send.
+procedure RemoveEmptyParams(AObject: TJSONObject; AMethod: TJRPCMethod);
+begin
+  if AMethod.ParamsType <> TJRPCParamsType.Null then
+    Exit;
+
+  // RemovePair detaches the pair and hands ownership to the caller, so it has
+  // to be freed or it leaks; it returns nil when the member is not there, and
+  // Free copes with that.
+  AObject.RemovePair('params').Free;
+end;
+
 { TJRequestSerializer }
 
 class function TJRequestSerializer.CanHandle(AType: PTypeInfo): Boolean;
@@ -1223,6 +1244,7 @@ var
 begin
   LRequest := AValue.AsType<TJRPCRequest>;
   LResult := AContext.WriteDataMember(LRequest, False) as TJSONObject;
+  RemoveEmptyParams(LResult, LRequest);
   // Neon omits the unwrapped "id" member when the id is null; emit it explicitly
   // so a request with "id": null round-trips faithfully.
   if LRequest.Id.IsNull then
@@ -1272,8 +1294,14 @@ end;
 
 function TJNotificationSerializer.Serialize(const AValue: TValue;
   ANeonObject: TNeonRttiObject; AContext: ISerializerContext): TJSONValue;
+var
+  LNotif: TJRPCNotification;
+  LResult: TJSONObject;
 begin
-  Result := AContext.WriteDataMember(AValue.AsType<TJRPCNotification>, False);
+  LNotif := AValue.AsType<TJRPCNotification>;
+  LResult := AContext.WriteDataMember(LNotif, False) as TJSONObject;
+  RemoveEmptyParams(LResult, LNotif);
+  Result := LResult;
 end;
 
 { JRPCAttribute }

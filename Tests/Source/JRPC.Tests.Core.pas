@@ -45,6 +45,9 @@ type
     [Test] procedure TestRequestMethodNotAStringIsInvalid;
     [Test] procedure TestRequestCreateFromJsonRejectsNonStringMethod;
     [Test] procedure TestRequestParamsCount;
+    [Test] procedure TestRequestWithoutParamsOmitsTheMember;
+    [Test] procedure TestNotificationWithoutParamsOmitsTheMember;
+    [Test] procedure TestRequestNullParamsRoundTripsAsAbsent;
 
     // TJRPCNotification
     [Test] procedure TestNotificationWithParams;
@@ -436,6 +439,105 @@ begin
       TJRPCRequest.CreateFromJson('{"jsonrpc":"2.0","id":1,"method":{"a":1}}').Free;
     end,
     EJRPCInvalidRequestError);
+end;
+
+procedure TJRPCMessageTest.TestRequestWithoutParamsOmitsTheMember;
+var
+  LRequest: TJRPCRequest;
+  LObj: TJSONObject;
+begin
+  // A param-less request used to go out as "params": null, which is neither an
+  // Array nor an Object and which a strict peer may answer with -32602.
+  LRequest := TJRPCRequest.Create;
+  try
+    LRequest.Method := 'foo';
+    LRequest.Id := 1;
+    LObj := ParseObject(LRequest.ToJson);
+    try
+      Assert.IsNotNull(LObj);
+      Assert.IsNull(LObj.GetValue('params'), 'the member is absent, not null');
+      Assert.AreEqual('foo', LObj.GetValue('method').Value);
+    finally
+      LObj.Free;
+    end;
+  finally
+    LRequest.Free;
+  end;
+
+  // ...but a request that has parameters still carries them.
+  LRequest := TJRPCRequest.Create;
+  try
+    LRequest.Method := 'foo';
+    LRequest.Id := 1;
+    LRequest.AddPositionParam(42);
+    LObj := ParseObject(LRequest.ToJson);
+    try
+      Assert.IsNotNull(LObj.GetValue('params'), 'real params are still emitted');
+      Assert.IsTrue(LObj.GetValue('params') is TJSONArray);
+    finally
+      LObj.Free;
+    end;
+  finally
+    LRequest.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestNotificationWithoutParamsOmitsTheMember;
+var
+  LNotif: TJRPCNotification;
+  LObj: TJSONObject;
+begin
+  LNotif := TJRPCNotification.Create;
+  try
+    LNotif.Method := 'notify';
+    LObj := ParseObject(LNotif.ToJson);
+    try
+      Assert.IsNotNull(LObj);
+      Assert.IsNull(LObj.GetValue('params'), 'the member is absent, not null');
+      Assert.IsNull(LObj.GetValue('id'), 'a notification still carries no id');
+    finally
+      LObj.Free;
+    end;
+  finally
+    LNotif.Free;
+  end;
+
+  LNotif := TJRPCNotification.Create;
+  try
+    LNotif.Method := 'notify';
+    LNotif.AddNamedParam('a', 1);
+    LObj := ParseObject(LNotif.ToJson);
+    try
+      Assert.IsNotNull(LObj.GetValue('params'), 'real params are still emitted');
+      Assert.IsTrue(LObj.GetValue('params') is TJSONObject);
+    finally
+      LObj.Free;
+    end;
+  finally
+    LNotif.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestRequestNullParamsRoundTripsAsAbsent;
+var
+  LParsed: TJRPCRequest;
+  LObj: TJSONObject;
+begin
+  // Incoming "params": null is accepted as "no params" (AssignJRPCParams), and
+  // re-serializing drops the member rather than echoing the null back out.
+  LParsed := TJRPCRequest.CreateFromJson(
+    '{"jsonrpc":"2.0","id":1,"method":"foo","params":null}');
+  try
+    Assert.AreEqual(TJRPCParamsType.Null, LParsed.ParamsType);
+    LObj := ParseObject(LParsed.ToJson);
+    try
+      Assert.IsNull(LObj.GetValue('params'), 'the null is not echoed back');
+    finally
+      LObj.Free;
+    end;
+  finally
+    LParsed.Free;
+  end;
 end;
 
 procedure TJRPCMessageTest.TestRequestMissingMethodIsInvalid;
