@@ -21,6 +21,7 @@ uses
 
   Neon.Core.Utils,
   Neon.Core.Tags,
+  Neon.Core.Types,
   Neon.Core.Nullables,
   Neon.Core.Attributes,
   Neon.Core.Persistence,
@@ -320,6 +321,8 @@ type
   ///   Abstract base class for JSON-RPC methods (Requests and Notifications).
   /// </summary>
   TJRPCMethod = class abstract(TJRPCMessage)
+  private
+    procedure SetParams(const AParams: TJSONValue);
   protected
     FMethod: string;
     FParams: TJSONValue;
@@ -359,10 +362,9 @@ type
     /// <summary>
     ///   The parameters for the method call.
     /// </summary>
-    [NeonProperty('params')]
     [NeonInclude(IncludeIf.NotNull)]
-    property Params: TJSONValue read FParams write FParams;
-
+    [NeonProperty('params'), NeonSetter('FParams')]
+    property Params: TJSONValue read FParams write SetParams;
   public
     /// <summary>
     ///   Creates a TJRPCMethod instance from a JSON string.
@@ -863,6 +865,15 @@ begin
     Exit(TJRPCParamsType.ByName);
 end;
 
+procedure TJRPCMethod.SetParams(const AParams: TJSONValue);
+begin
+  if FParams <> AParams then
+  begin
+    FParams.Free;
+    FParams := AParams;
+  end;
+end;
+
 procedure TJRPCMethod.AddNamedParam(const AName: string; const AValue: TValue);
 var
   LParam: TJSONValue;
@@ -1115,17 +1126,11 @@ begin
   begin
     // Position parameters
     if LParams is TJSONArray then
-    begin
-      LReq.Params.Free;
       LReq.Params := LParams.Clone as TJSONArray;
-    end;
 
     // Named parameters
     if LParams is TJSONObject then
-    begin
-      LReq.Params.Free;
       LReq.Params := LParams.Clone as TJSONObject;
-    end;
   end;
 
   Result := TValue.From<TJRPCRequest>(LReq);
@@ -1789,10 +1794,7 @@ begin
   Result.InternalId := FInternalId;
   Result.Id := FId;
   Result.Method := FMethod;
-  if Assigned(FParams) then
-    Result.Params := FParams.Clone as TJSONValue
-  else
-    Result.Params := nil;
+  Result.Params := FParams.Clone as TJSONValue;
 end;
 
 class function TJRPCRequest.CreateFromJson(const AJSON: string): TJRPCRequest;
@@ -1818,10 +1820,7 @@ begin
   Result := TJRPCNotification.Create;
   Result.InternalId := FInternalId;
   Result.Method := FMethod;
-  if Assigned(FParams) then
-    Result.Params := FParams.Clone as TJSONValue
-  else
-    Result.Params := nil;
+  Result.Params := FParams.Clone as TJSONValue;
 end;
 
 function TJRPCNotification.GetType: TJRPCMessageType;
