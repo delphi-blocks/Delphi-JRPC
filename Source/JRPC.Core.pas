@@ -1541,6 +1541,10 @@ end;
 constructor TJRPCMessages.Create(AOwnsObjects: Boolean);
 begin
   FList := TObjectList<TJRPCMessage>.Create(AOwnsObjects);
+  // A hand-built list has no payload to take its shape from, so it defaults to
+  // "single": one message serializes to one object. FromJson overrides this in
+  // both directions once a real payload is seen.
+  FSingle := True;
 end;
 
 class function TJRPCMessages.CreateFromJson(AJSON: TJSONValue): TJRPCMessages;
@@ -1732,7 +1736,12 @@ begin
   if FList.Count = 0 then
     Exit('');
 
-  if FList.Count = 1 then
+  // Per JSON-RPC 2.0 the reply mirrors the shape of the payload, not the number
+  // of messages: a single Request object is answered with a single Response
+  // object, a batch is answered with an Array *even when it holds exactly one
+  // Response* (a batch of one request, or a batch where all but one element are
+  // notifications). Only Single says which one this is - FList.Count can't.
+  if FSingle and (FList.Count = 1) then
     Exit(TNeon.ObjectToJSONString(FList[0], JRPCNeonConfig));
 
   LRes := TJSONArray.Create;
@@ -1761,6 +1770,10 @@ begin
   end
   else if AValue is TJSONArray then
   begin
+    // A batch: the reply must be an Array too, however many messages come out
+    // of it - one, or none of them answerable.
+    FSingle := False;
+
     // Per JSON-RPC 2.0, an empty batch is an Invalid Request.
     if (AValue as TJSONArray).Count = 0 then
       raise EJRPCInvalidRequestError.Create(SJRPCInvalidRequest);

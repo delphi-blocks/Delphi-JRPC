@@ -141,6 +141,13 @@ begin
   // outlive the API instances they reference and are released as soon as the
   // responses have been produced, so no request leaks objects or stale context
   // data.
+
+  // The reply must have the same shape as the payload: an object answers an
+  // object, an array answers an array. Carrying Single over is what tells
+  // AResponses.ToJson which one to emit when the batch produced exactly one
+  // Response (see TJRPCMessages.ToJson).
+  AResponses.Single := AMessages.Single;
+
   LContext := TJRPCContext.Create;
   LGarbage := TGarbageCollector.CreateInstance;
   LInstances := TObjectList.Create(True);
@@ -182,8 +189,12 @@ begin
           // Malformed JSON (parse error), an empty batch, or a top-level value
           // that is neither a Request nor a batch: answer with a single JSON-RPC
           // error response carrying a null id - never an empty body.
+          // Single is set explicitly: the spec answers all three of these with a
+          // bare Response object, never with an array - including "[]", whose
+          // brackets never produced a batch we could reply to element by element.
           var LErrorId: TJRPCID;
           LRequestList := TJRPCMessages.Create(True);
+          LRequestList.Single := True;
           LRequestList.AddMessage(TJRPCError.CreateFromException(E, LErrorId));
         end;
       end;

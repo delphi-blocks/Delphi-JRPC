@@ -29,6 +29,10 @@ type
     [Test] procedure TestProcessRequestNotificationNoResponse;
     [Test] procedure TestProcessRequestBatch;
     [Test] procedure TestProcessRequestBatchWithInvalidElement;
+    [Test] procedure TestProcessRequestBatchOfOneStaysArray;
+    [Test] procedure TestProcessRequestBatchSingleAnswerStaysArray;
+    [Test] procedure TestProcessRequestSingleStaysObject;
+    [Test] procedure TestProcessRequestEmptyBatchAnswersObject;
     [Test] procedure TestProcessRequestMethodNotFound;
     [Test] procedure TestProcessRequestInvalidParams;
     [Test] procedure TestProcessRequestMissingParam;
@@ -246,6 +250,80 @@ begin
       '{"jsonrpc":"2.0","id":2,"method":"math/sum","params":{"a":3,"b":4}}' +
       ']');
     Assert.IsTrue(IsArrayOfSize(LResponse, 2), 'batch answers only the requests');
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestBatchOfOneStaysArray;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // A batch is answered with an Array even when it holds a single request:
+    // the reply mirrors the shape of the payload, not the message count.
+    LResponse := LServer.ProcessRequest(
+      '[{"jsonrpc":"2.0","id":1,"method":"math/sum","params":{"a":1,"b":1}}]');
+    Assert.IsTrue(IsArrayOfSize(LResponse, 1), 'a batch of one still answers with an array');
+    Assert.AreEqual('2', GetBatchResultValue(LResponse, 0));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestBatchSingleAnswerStaysArray;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // Same rule when the batch is larger but only one element is answerable:
+    // the notifications produce nothing, the single Response stays wrapped.
+    LResponse := LServer.ProcessRequest(
+      '[' +
+      '{"jsonrpc":"2.0","id":1,"method":"math/sum","params":{"a":1,"b":1}},' +
+      '{"jsonrpc":"2.0","method":"math/sum","params":{"a":9,"b":9}},' +
+      '{"jsonrpc":"2.0","method":"math/sum","params":{"a":3,"b":4}}' +
+      ']');
+    Assert.IsTrue(IsArrayOfSize(LResponse, 1), 'one answer in a batch is still an array');
+    Assert.AreEqual('2', GetBatchResultValue(LResponse, 0));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestSingleStaysObject;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // The converse: a bare Request object must never be answered with an array.
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":"math/sum","params":{"a":1,"b":1}}');
+    Assert.IsFalse(IsArrayOfSize(LResponse, 1), 'a single request is not answered with an array');
+    Assert.AreEqual('2', GetResultValue(LResponse));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestEmptyBatchAnswersObject;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // An empty array never became a batch, so its Invalid Request is reported
+    // as a bare Response object - the spec is explicit about this one.
+    LResponse := LServer.ProcessRequest('[]');
+    Assert.IsFalse(IsArrayOfSize(LResponse, 1), 'an empty batch answers with an object');
+    Assert.AreEqual(JRPC_INVALID_REQUEST, ErrorCodeOf(LResponse));
   finally
     LServer.Free;
   end;
