@@ -1861,11 +1861,17 @@ end;
 
 function TJRPCMessages.ToJson: string;
 var
+  LConfig: INeonConfiguration;
   LRes: TJSONArray;
   LMsg: TJRPCMessage;
 begin
   if FList.Count = 0 then
     Exit('');
+
+  // One configuration for the whole list: JRPCNeonConfig builds a fresh one,
+  // registering six serializers, on every call - and it was being called once
+  // per message in the loop below.
+  LConfig := JRPCNeonConfig;
 
   // Per JSON-RPC 2.0 the reply mirrors the shape of the payload, not the number
   // of messages: a single Request object is answered with a single Response
@@ -1873,20 +1879,20 @@ begin
   // Response* (a batch of one request, or a batch where all but one element are
   // notifications). Only Single says which one this is - FList.Count can't.
   if FSingle and (FList.Count = 1) then
-    Exit(TNeon.ObjectToJSONString(FList[0], JRPCNeonConfig));
+    Exit(TNeon.ObjectToJSONString(FList[0], LConfig));
 
   LRes := TJSONArray.Create;
   try
     for LMsg in FList do
-    begin
-      {
-      if LMSg is TJRPCError then
-        Continue;
-      }
-      LRes.AddElement(TNeon.ObjectToJSON(LMsg, JRPCNeonConfig));
-    end;
+      LRes.AddElement(TNeon.ObjectToJSON(LMsg, LConfig));
 
-    Result := TNeon.Print(LRes, True);
+    // Formatting comes from the configuration, exactly as it does in the
+    // single-message branch above (TNeon.ObjectToJSONString reads the same
+    // flag). This used to hardcode pretty-printing, so one server answered a
+    // batch with indented multi-line JSON and a single request with compact
+    // JSON - two wire formats for the same endpoint, and bytes spent on
+    // whitespace no client reads.
+    Result := TNeon.Print(LRes, LConfig.GetPrettyPrint);
   finally
     LRes.Free;
   end;

@@ -85,6 +85,7 @@ type
     [Test] procedure TestMessagesFromResultAndErrorIsInvalid;
     [Test] procedure TestMessagesToJsonSingle;
     [Test] procedure TestMessagesToJsonBatch;
+    [Test] procedure TestMessagesToJsonFormatIsConsistent;
     [Test] procedure TestMessagesFromStream;
 
     // TJRPCRegistry
@@ -998,6 +999,36 @@ begin
     '{"jsonrpc":"2.0","id":1,"method":"math/sum","params":{"a":1,"b":2}}');
   try
     Assert.IsTrue(not LMsgs.ToJson.StartsWith('['), 'single message serializes as an object');
+  finally
+    LMsgs.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestMessagesToJsonFormatIsConsistent;
+var
+  LMsgs: TJRPCMessages;
+begin
+  // A batch used to be pretty-printed while a single message was compact, so
+  // one endpoint answered in two wire formats depending on what was asked of
+  // it. Both now take their formatting from the Neon configuration, which does
+  // not enable pretty-printing.
+  LMsgs := TJRPCMessages.CreateFromJson(
+    '{"jsonrpc":"2.0","id":1,"method":"math/sum","params":{"a":1,"b":2}}');
+  try
+    Assert.DoesNotContain(LMsgs.ToJson, sLineBreak, 'a single message is compact');
+  finally
+    LMsgs.Free;
+  end;
+
+  LMsgs := TJRPCMessages.CreateFromJson(
+    '[' +
+    '{"jsonrpc":"2.0","id":1,"method":"a"},' +
+    '{"jsonrpc":"2.0","id":2,"method":"b"}' +
+    ']');
+  try
+    Assert.DoesNotContain(LMsgs.ToJson, sLineBreak, 'a batch is compact too');
+    // ...and is still parseable as the array it must be.
+    Assert.IsTrue(LMsgs.ToJson.StartsWith('['));
   finally
     LMsgs.Free;
   end;
