@@ -42,6 +42,7 @@ type
     [Test] procedure TestHandleErrorParseException;
     [Test] procedure TestHandleErrorGenericException;
     [Test] procedure TestHandleErrorGenericExceptionExposedWhenEnabled;
+    [Test] procedure TestHandleErrorAgreesWithCreateFromException;
     [Test] procedure TestHandleErrorLogsSuppressedException;
     [Test] procedure TestInvokeEmitsPerfLogs;
     [Test] procedure TestInvokeArrayResultIsCollected;
@@ -554,6 +555,42 @@ begin
   finally
     TJRPCError.ExposeExceptionDetails := False;
   end;
+end;
+
+procedure TJRPCInvokerTest.TestHandleErrorAgreesWithCreateFromException;
+
+  procedure AssertSame(E: Exception; const AWhat: string);
+  var
+    LFromInvoker, LFromCore: TJRPCError;
+  begin
+    LFromInvoker := TJRPCInvoker.HandleError(E, 1);
+    try
+      LFromCore := TJRPCError.CreateFromException(E, 1);
+      try
+        Assert.AreEqual(LFromCore.ToJson, LFromInvoker.ToJson,
+          'the two paths must describe ' + AWhat + ' identically');
+      finally
+        LFromCore.Free;
+      end;
+    finally
+      LFromInvoker.Free;
+      E.Free;
+    end;
+  end;
+
+begin
+  // The same failure must be described the same way whether it surfaced while
+  // parsing or while dispatching. These were two hand-maintained copies of the
+  // same mapping and had drifted: an unanticipated exception was -32603 in the
+  // invoker and -32600 in the core, so the client was told its request was
+  // malformed or that the server had failed depending only on where it broke.
+  AssertSame(Exception.Create('boom'), 'an unexpected exception');
+  AssertSame(EInvalidCast.Create('cast'), 'an RTL exception');
+  AssertSame(EJRPCMethodNotFoundError.Create('Method [x] non found'),
+    'a method-not-found error');
+  AssertSame(EJRPCInvalidParamsError.Create('Invalid method parameters.'),
+    'an invalid-params error');
+  AssertSame(EJRPCParseError.Create('bad json'), 'a parse error');
 end;
 
 procedure TJRPCInvokerTest.TestHandleErrorLogsSuppressedException;

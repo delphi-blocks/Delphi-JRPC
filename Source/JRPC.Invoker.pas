@@ -261,26 +261,13 @@ end;
 
 class function TJRPCInvoker.HandleError(E: Exception; AId: TJRPCID): TJRPCError;
 begin
-  Result := TJRPCError.Create;
-  if E is EJRPCException then
-  begin
-    Result.Id := AId;
-    Result.Error.Code := EJRPCException(E).Code;
-    Result.Error.Message := E.Message;
-  end
-  else if E is EJSONParseException then
-  begin
-    Result.Id := AId;
-    Result.Error.Code := JRPC_PARSE_ERROR;
-    Result.Error.Message := E.Message;
-  end
-  else
-  begin
-    Result.Id := AId;
-    // Same treatment as the parse-time path, but keeping this branch's own code:
-    // a failure during dispatch is an Internal error, not an Invalid Request.
-    TJRPCError.SetUnexpectedDetails(Result.Error, JRPC_INTERNAL_ERROR, E);
-  end;
+  // Kept as the invoker's entry point (TJRPCServer and existing callers use it),
+  // but the mapping itself lives in one place now. This used to be a second,
+  // hand-maintained copy of TJRPCError.CreateFromException, and the two had
+  // drifted: an exception neither side anticipated was an Internal error here
+  // and an Invalid Request there, so the same failure was described to the
+  // client in two contradictory ways depending on where it surfaced.
+  Result := TJRPCError.CreateFromException(E, AId);
 end;
 
 class procedure TJRPCInvoker.Invoke(AContext: TJRPCInvokerContext);

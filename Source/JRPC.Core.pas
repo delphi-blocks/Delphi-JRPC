@@ -2008,7 +2008,13 @@ begin
   else
   begin
     Result.Id := AId;
-    SetUnexpectedDetails(Result.Error, JRPC_INVALID_REQUEST, E);
+    // Internal error, not Invalid Request. Every genuine "your payload is not a
+    // valid Request object" condition raises EJRPCInvalidRequestError and is
+    // answered with -32600 by the first branch above; anything reaching here is
+    // a failure the server did not anticipate. Reporting that as -32600 blames
+    // the caller for a bug on this side, and a client that believes its request
+    // was malformed will not retry a call that might well succeed.
+    SetUnexpectedDetails(Result.Error, JRPC_INTERNAL_ERROR, E);
   end;
 end;
 

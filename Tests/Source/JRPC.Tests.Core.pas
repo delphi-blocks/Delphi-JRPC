@@ -608,7 +608,7 @@ begin
   LError := TJRPCError.CreateFromException(
     Exception.Create('boom'), 1);
   try
-    Assert.AreEqual(JRPC_INVALID_REQUEST, Integer(LError.Error.Code));
+    Assert.AreEqual(JRPC_INTERNAL_ERROR, Integer(LError.Error.Code));
     Assert.IsTrue(LError.Error.Data.IsEmpty, 'no class name in data');
     Assert.AreEqual(SJRPCUnexpectedError, string(LError.Error.Message),
       'a fixed message, not the exception''s own');
@@ -625,7 +625,7 @@ begin
   try
     LError := TJRPCError.CreateFromException(Exception.Create('boom'), 1);
     try
-      Assert.AreEqual(JRPC_INVALID_REQUEST, Integer(LError.Error.Code));
+      Assert.AreEqual(JRPC_INTERNAL_ERROR, Integer(LError.Error.Code));
       Assert.AreEqual('Exception', LError.Error.Data.AsString);
       Assert.AreEqual('boom', string(LError.Error.Message));
     finally
