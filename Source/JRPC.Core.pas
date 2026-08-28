@@ -50,6 +50,7 @@ resourcestring
   SJRPCInvalidRequest = 'Invalid JRPC Request';
   SJRPCInvalidParamsStructure = 'The "params" member must be an array or an object';
   SJRPCInvalidMethodMember = 'The "method" member must be a string';
+  SJRPCUnexpectedError = 'Unexpected error while processing the request';
   SJRPCCurrentRequestNotFound = 'CurrentRequest not found';
   SJRPCResponsesNotFound = 'Responses not found';
   SJRPCDuplicateFlatMethod = 'Duplicate JSON-RPC method [%s]: already registered by class [%s]';
@@ -450,6 +451,8 @@ type
   /// </summary>
   TJRPCError = class(TJRPCMessage)
   private
+    class var FExposeExceptionDetails: Boolean;
+  private
     FId: TJRPCID;
     FError: TJRPCErrorDetails;
     FRequest: Boolean;
@@ -484,6 +487,30 @@ type
     class function CreateFromJson(const AJSON: string): TJRPCError;
     class function CreateFromException(E: Exception; AId: TJRPCID): TJRPCError; overload;
     class function CreateFromException(E: Exception; AJSON: TJSONObject): TJRPCError; overload;
+
+    /// <summary>
+    ///   Fills in an error object for an exception that is not part of the
+    ///   JSON-RPC protocol, honouring <see cref="ExposeExceptionDetails" />.
+    ///   The exception is always logged, whatever the client is told.
+    /// </summary>
+    class procedure SetUnexpectedDetails(AError: TJRPCErrorDetails;
+      ACode: Integer; E: Exception); static;
+
+    /// <summary>
+    ///   Whether an unexpected (non JSON-RPC) exception is described to the
+    ///   client verbatim: its own message in "message", its class name in
+    ///   "data". Defaults to False, which sends a fixed message and no "data".
+    /// </summary>
+    /// <remarks>
+    ///   Off by default because RTL exception messages routinely carry instance
+    ///   addresses, module names and code offsets, and the Delphi class name
+    ///   says more about the server's internals than any caller has a use for.
+    ///   Turn it on in development; the exception reaches the Logify logger at
+    ///   Error level either way, so production keeps the diagnosis without
+    ///   putting it on the wire.
+    /// </remarks>
+    class property ExposeExceptionDetails: Boolean
+      read FExposeExceptionDetails write FExposeExceptionDetails;
   end;
 
   /// <summary>
@@ -741,6 +768,9 @@ type
   function JRPCNeonConfig: INeonConfiguration;
 
 implementation
+
+uses
+  Logify;
 
 function JRPCNeonConfig: INeonConfiguration;
 begin
@@ -1978,10 +2008,31 @@ begin
   else
   begin
     Result.Id := AId;
-    Result.Error.Code := JRPC_INVALID_REQUEST;
-    Result.Error.Message := E.Message;
-    Result.Error.Data := E.ClassName;
+    SetUnexpectedDetails(Result.Error, JRPC_INVALID_REQUEST, E);
   end;
+end;
+
+class procedure TJRPCError.SetUnexpectedDetails(AError: TJRPCErrorDetails; ACode: Integer; E: Exception);
+begin
+  AError.Code := ACode;
+
+  // Logged whatever the client is told, so keeping the details off the wire
+  // does not also keep them from whoever has to diagnose the failure. Nothing
+  // is shown until the application registers a Logify adapter.
+  Logger.LogError(E, Format('[JRPC] Unexpected %s: %s', [E.ClassName, E.Message]));
+
+  if FExposeExceptionDetails then
+  begin
+    AError.Message := E.Message;
+    AError.Data := E.ClassName;
+  end
+  else
+    // Deliberately says nothing about the exception: RTL messages routinely
+    // carry instance addresses, module names and code offsets ("Access
+    // violation at address 0092BE47 in module 'Server.exe' (offset 18BE47)"),
+    // and the Delphi class name describes the server's internals rather than
+    // anything the caller can act on.
+    AError.Message := SJRPCUnexpectedError;
 end;
 
 { TJErrorSerializer }

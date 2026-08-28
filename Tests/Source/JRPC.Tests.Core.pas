@@ -60,6 +60,8 @@ type
     [Test] procedure TestErrorCreateFromJRPCException;
     [Test] procedure TestErrorCreateFromParseException;
     [Test] procedure TestErrorCreateFromGenericException;
+    [Test] procedure TestErrorCreateFromGenericExceptionExposedWhenEnabled;
+    [Test] procedure TestErrorProtocolExceptionsKeepTheirMessage;
     [Test] procedure TestErrorSerializeNullId;
     [Test] procedure TestErrorClone;
 
@@ -601,11 +603,60 @@ procedure TJRPCMessageTest.TestErrorCreateFromGenericException;
 var
   LError: TJRPCError;
 begin
+  // The parse-time counterpart of the invoker's HandleError: the code stays put,
+  // but nothing about the exception is described to the client by default.
   LError := TJRPCError.CreateFromException(
     Exception.Create('boom'), 1);
   try
     Assert.AreEqual(JRPC_INVALID_REQUEST, Integer(LError.Error.Code));
-    Assert.AreEqual('Exception', LError.Error.Data.AsString);
+    Assert.IsTrue(LError.Error.Data.IsEmpty, 'no class name in data');
+    Assert.AreEqual(SJRPCUnexpectedError, string(LError.Error.Message),
+      'a fixed message, not the exception''s own');
+  finally
+    LError.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestErrorCreateFromGenericExceptionExposedWhenEnabled;
+var
+  LError: TJRPCError;
+begin
+  TJRPCError.ExposeExceptionDetails := True;
+  try
+    LError := TJRPCError.CreateFromException(Exception.Create('boom'), 1);
+    try
+      Assert.AreEqual(JRPC_INVALID_REQUEST, Integer(LError.Error.Code));
+      Assert.AreEqual('Exception', LError.Error.Data.AsString);
+      Assert.AreEqual('boom', string(LError.Error.Message));
+    finally
+      LError.Free;
+    end;
+  finally
+    TJRPCError.ExposeExceptionDetails := False;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestErrorProtocolExceptionsKeepTheirMessage;
+var
+  LError: TJRPCError;
+begin
+  // Only the unexpected-exception branch is muted. JSON-RPC exceptions carry
+  // messages the library wrote on purpose, and the client still gets them.
+  LError := TJRPCError.CreateFromException(
+    EJRPCMethodNotFoundError.Create('Method [x] non found'), 1);
+  try
+    Assert.AreEqual(JRPC_METHOD_NOT_FOUND, Integer(LError.Error.Code));
+    Assert.AreEqual('Method [x] non found', string(LError.Error.Message));
+    Assert.IsTrue(LError.Error.Data.IsEmpty);
+  finally
+    LError.Free;
+  end;
+
+  LError := TJRPCError.CreateFromException(
+    EJRPCParseError.Create(SJRPCInvalidJSONReceived), 1);
+  try
+    Assert.AreEqual(JRPC_PARSE_ERROR, Integer(LError.Error.Code));
+    Assert.AreEqual(SJRPCInvalidJSONReceived, string(LError.Error.Message));
   finally
     LError.Free;
   end;

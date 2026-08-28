@@ -41,6 +41,8 @@ type
     [Test] procedure TestHandleErrorJRPCException;
     [Test] procedure TestHandleErrorParseException;
     [Test] procedure TestHandleErrorGenericException;
+    [Test] procedure TestHandleErrorGenericExceptionExposedWhenEnabled;
+    [Test] procedure TestHandleErrorLogsSuppressedException;
     [Test] procedure TestInvokeEmitsPerfLogs;
     [Test] procedure TestInvokeArrayResultIsCollected;
   end;
@@ -519,12 +521,69 @@ procedure TJRPCInvokerTest.TestHandleErrorGenericException;
 var
   LError: TJRPCError;
 begin
+  // An exception that is not part of the protocol is still an internal error,
+  // but nothing about it reaches the client by default: RTL messages carry
+  // instance addresses and module offsets, and the class name describes the
+  // server's internals.
   LError := TJRPCInvoker.HandleError(EInvalidCast.Create('cast'), 1);
   try
     Assert.AreEqual(JRPC_INTERNAL_ERROR, Integer(LError.Error.Code));
-    Assert.AreEqual('EInvalidCast', LError.Error.Data.AsString);
+    Assert.IsTrue(LError.Error.Data.IsEmpty, 'no class name in data');
+    Assert.AreEqual(SJRPCUnexpectedError, string(LError.Error.Message),
+      'a fixed message, not the exception''s own');
   finally
     LError.Free;
+  end;
+end;
+
+procedure TJRPCInvokerTest.TestHandleErrorGenericExceptionExposedWhenEnabled;
+var
+  LError: TJRPCError;
+begin
+  // Opting in restores the old, chatty behaviour for development.
+  TJRPCError.ExposeExceptionDetails := True;
+  try
+    LError := TJRPCInvoker.HandleError(EInvalidCast.Create('cast'), 1);
+    try
+      Assert.AreEqual(JRPC_INTERNAL_ERROR, Integer(LError.Error.Code));
+      Assert.AreEqual('EInvalidCast', LError.Error.Data.AsString);
+      Assert.AreEqual('cast', string(LError.Error.Message));
+    finally
+      LError.Free;
+    end;
+  finally
+    TJRPCError.ExposeExceptionDetails := False;
+  end;
+end;
+
+procedure TJRPCInvokerTest.TestHandleErrorLogsSuppressedException;
+var
+  LError: TJRPCError;
+  LTarget: TStringList;
+begin
+  // Keeping the details off the wire must not keep them from whoever has to
+  // diagnose the failure: the exception goes to the logger either way.
+  LTarget := TStringList.Create;
+  try
+    TLoggerAdapterRegistry.Instance.RegisterFactory(
+      TLogifyAdapterBufferFactory.CreateAdapterFactory(
+        'JRPC.Tests.InvokerError', TLogLevel.Debug, LTarget));
+    try
+      LError := TJRPCInvoker.HandleError(EInvalidCast.Create('cast'), 1);
+      try
+        Assert.IsTrue(LError.Error.Data.IsEmpty, 'still nothing on the wire');
+      finally
+        LError.Free;
+      end;
+      Assert.Contains(LTarget.Text, 'EInvalidCast',
+        'the exception class reaches the log');
+      Assert.Contains(LTarget.Text, 'cast',
+        'the exception message reaches the log');
+    finally
+      TLoggerAdapterRegistry.Instance.UnregisterFactory('JRPC.Tests.InvokerError');
+    end;
+  finally
+    LTarget.Free;
   end;
 end;
 

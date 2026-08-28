@@ -277,9 +277,9 @@ begin
   else
   begin
     Result.Id := AId;
-    Result.Error.Code := JRPC_INTERNAL_ERROR;
-    Result.Error.Message := E.Message;
-    Result.Error.Data := E.ClassName;
+    // Same treatment as the parse-time path, but keeping this branch's own code:
+    // a failure during dispatch is an Internal error, not an Invalid Request.
+    TJRPCError.SetUnexpectedDetails(Result.Error, JRPC_INTERNAL_ERROR, E);
   end;
 end;
 
