@@ -371,6 +371,19 @@ type
     procedure AddNamedParam(const AName: string; const AValue: TValue);
 
     /// <summary>
+    ///   Neon include hook for the "params" member (see the NeonInclude
+    ///   attribute below). Keeps params out of the JSON when the message
+    ///   carries none.
+    /// </summary>
+    /// <remarks>
+    ///   FParams holds a live TJSONNull rather than nil, so IncludeIf.NotNull
+    ///   never fires and every param-less message went out as "params": null.
+    ///   JSON-RPC 2.0 wants the member absent: null is neither an Array nor an
+    ///   Object, and a peer that validates strictly may answer -32602.
+    /// </remarks>
+    function ShouldInclude(const AContext: TNeonIgnoreIfContext): Boolean;
+
+    /// <summary>
     ///   The name of the method to be invoked.
     /// </summary>
     [NeonProperty('method')]
@@ -379,7 +392,9 @@ type
     /// <summary>
     ///   The parameters for the method call.
     /// </summary>
-    [NeonInclude(IncludeIf.NotNull)]
+    // Not IncludeIf.NotNull: FParams holds a live TJSONNull, never nil, so that
+    // test can never exclude the member. ShouldInclude above decides instead.
+    [NeonInclude(IncludeIf.CustomFunction)]
     [NeonProperty('params'), NeonSetter('FParams')]
     property Params: TJSONValue read FParams write SetParams;
   public
@@ -897,6 +912,11 @@ begin
     Exit((FParams as TJSONObject).Count);
 end;
 
+function TJRPCMethod.ShouldInclude(const AContext: TNeonIgnoreIfContext): Boolean;
+begin
+  Result := ParamsType <> TJRPCParamsType.Null;
+end;
+
 function TJRPCMethod.ParamsType: TJRPCParamsType;
 begin
   Result := TJRPCParamsType.Null;
@@ -1190,27 +1210,6 @@ begin
     raise EJRPCInvalidParamsError.Create(SJRPCInvalidParamsStructure);
 end;
 
-// Drops the "params" member from a serialized Request/Notification that carries
-// no parameters. TJRPCMethod keeps a live TJSONNull in FParams rather than nil
-// (so ParamsType, AddNamedParam and friends have something to work with), which
-// means Neon's IncludeIf.NotNull never fires and an omitted params went out as
-// "params": null on every param-less message this library sent.
-//
-// JSON-RPC 2.0 wants the member simply absent: null is neither an Array nor an
-// Object, and a peer that validates strictly is entitled to answer -32602. Our
-// own parser accepts it on the way in (see AssignJRPCParams) - be liberal in
-// what you accept, strict in what you send.
-procedure RemoveEmptyParams(AObject: TJSONObject; AMethod: TJRPCMethod);
-begin
-  if AMethod.ParamsType <> TJRPCParamsType.Null then
-    Exit;
-
-  // RemovePair detaches the pair and hands ownership to the caller, so it has
-  // to be freed or it leaks; it returns nil when the member is not there, and
-  // Free copes with that.
-  AObject.RemovePair('params').Free;
-end;
-
 { TJRequestSerializer }
 
 class function TJRequestSerializer.CanHandle(AType: PTypeInfo): Boolean;
@@ -1258,7 +1257,6 @@ var
 begin
   LRequest := AValue.AsType<TJRPCRequest>;
   LResult := AContext.WriteDataMember(LRequest, False) as TJSONObject;
-  RemoveEmptyParams(LResult, LRequest);
   // Neon omits the unwrapped "id" member when the id is null; emit it explicitly
   // so a request with "id": null round-trips faithfully.
   if LRequest.Id.IsNull then
@@ -1314,7 +1312,6 @@ var
 begin
   LNotif := AValue.AsType<TJRPCNotification>;
   LResult := AContext.WriteDataMember(LNotif, False) as TJSONObject;
-  RemoveEmptyParams(LResult, LNotif);
   Result := LResult;
 end;
 
