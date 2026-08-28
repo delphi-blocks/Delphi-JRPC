@@ -42,6 +42,8 @@ type
     [Test] procedure TestRequestFractionalIdIsInvalid;
     [Test] procedure TestRequestInvalidJsonRpcVersion;
     [Test] procedure TestRequestMissingMethodIsInvalid;
+    [Test] procedure TestRequestMethodNotAStringIsInvalid;
+    [Test] procedure TestRequestCreateFromJsonRejectsNonStringMethod;
     [Test] procedure TestRequestParamsCount;
 
     // TJRPCNotification
@@ -394,6 +396,42 @@ begin
       var LRequest := TJRPCRequest.CreateFromJson(
         '{"jsonrpc":"1.0","id":1,"method":"m"}');
       LRequest.Free;
+    end,
+    EJRPCInvalidRequestError);
+end;
+
+procedure TJRPCMessageTest.TestRequestMethodNotAStringIsInvalid;
+var
+  LMsgs: TJRPCMessages;
+begin
+  // A non-string "method" is an Invalid Request, not a request for a method
+  // that happens not to exist: the number used to be coerced into its text.
+  LMsgs := TJRPCMessages.CreateFromJson('{"jsonrpc":"2.0","id":1,"method":123}');
+  try
+    Assert.AreEqual(1, LMsgs.Count);
+    Assert.IsTrue(LMsgs.List[0] is TJRPCError);
+    Assert.AreEqual(JRPC_INVALID_REQUEST, Integer((LMsgs.List[0] as TJRPCError).Error.Code));
+    Assert.AreEqual(1, (LMsgs.List[0] as TJRPCError).Id.AsInteger, 'the id is still echoed');
+  finally
+    LMsgs.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestRequestCreateFromJsonRejectsNonStringMethod;
+begin
+  // The check lives in the serializer, so it also guards the public
+  // CreateFromJson entry point, which never goes through GetMessageType.
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCRequest.CreateFromJson('{"jsonrpc":"2.0","id":1,"method":123}').Free;
+    end,
+    EJRPCInvalidRequestError);
+
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCRequest.CreateFromJson('{"jsonrpc":"2.0","id":1,"method":{"a":1}}').Free;
     end,
     EJRPCInvalidRequestError);
 end;

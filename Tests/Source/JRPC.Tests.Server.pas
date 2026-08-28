@@ -29,6 +29,9 @@ type
     [Test] procedure TestProcessRequestNotificationNoResponse;
     [Test] procedure TestProcessRequestBatch;
     [Test] procedure TestProcessRequestBatchWithInvalidElement;
+    [Test] procedure TestProcessRequestMethodNotAStringIsInvalidRequest;
+    [Test] procedure TestProcessRequestMethodErrorCarriesNoRTLDetail;
+    [Test] procedure TestProcessRequestEmptyMethodIsMethodNotFound;
     [Test] procedure TestProcessRequestParamsNotStructuredIsInvalidParams;
     [Test] procedure TestProcessRequestParamsNullIsTreatedAsAbsent;
     [Test] procedure TestProcessRequestNotificationBadParamsNoResponse;
@@ -258,6 +261,79 @@ begin
       '{"jsonrpc":"2.0","id":2,"method":"math/sum","params":{"a":3,"b":4}}' +
       ']');
     Assert.IsTrue(IsArrayOfSize(LResponse, 2), 'batch answers only the requests');
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestMethodNotAStringIsInvalidRequest;
+var
+  LServer: TJRPCServer;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // "method" MUST be a String. A number used to be coerced into its text and
+    // answered with a misleading -32601 "Method [123] non found", as if the
+    // client had asked for a method that merely happened not to exist.
+    Assert.AreEqual(JRPC_INVALID_REQUEST, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":123}')), 'a number method is rejected');
+    Assert.AreEqual(JRPC_INVALID_REQUEST, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":2,"method":true}')), 'a boolean method is rejected');
+    Assert.AreEqual(JRPC_INVALID_REQUEST, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":3,"method":{"a":1}}')), 'an object method is rejected');
+    Assert.AreEqual(JRPC_INVALID_REQUEST, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":4,"method":["a"]}')), 'an array method is rejected');
+    Assert.AreEqual(JRPC_INVALID_REQUEST, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":5,"method":null}')), 'a null method is rejected');
+
+    // And a notification with a bad method is still never answered.
+    Assert.AreEqual('', LServer.ProcessRequest('{"jsonrpc":"2.0","method":123}'));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestMethodErrorCarriesNoRTLDetail;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+  LObj: TJSONObject;
+  LErr: TJSONValue;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // An object method used to reach TJSONValue.GetValue<string> and escape as
+    // a raw RTL conversion message quoted verbatim to the client, carrying an
+    // instance address and "data":"EJSONException".
+    LResponse := LServer.ProcessRequest('{"jsonrpc":"2.0","id":1,"method":{"a":1}}');
+    LObj := ParseObject(LResponse);
+    try
+      Assert.IsNotNull(LObj);
+      LErr := LObj.GetValue('error');
+      Assert.IsTrue(Assigned(LErr) and (LErr is TJSONObject));
+      Assert.IsNull(TJSONObject(LErr).GetValue('data'),
+        'no exception class name is leaked in data');
+      Assert.AreEqual(SJRPCInvalidMethodMember,
+        TJSONObject(LErr).GetValue('message').Value,
+        'the message is ours, not the RTL conversion text');
+    finally
+      LObj.Free;
+    end;
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestEmptyMethodIsMethodNotFound;
+var
+  LServer: TJRPCServer;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // An empty string is still a String, so it is a well-formed Request asking
+    // for a method that does not exist - not an Invalid Request.
+    Assert.AreEqual(JRPC_METHOD_NOT_FOUND, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":""}')));
   finally
     LServer.Free;
   end;

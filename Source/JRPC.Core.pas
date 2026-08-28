@@ -49,6 +49,7 @@ resourcestring
   SJRPCInvalidJSONReceived = 'An invalid JSON was received by the server';
   SJRPCInvalidRequest = 'Invalid JRPC Request';
   SJRPCInvalidParamsStructure = 'The "params" member must be an array or an object';
+  SJRPCInvalidMethodMember = 'The "method" member must be a string';
   SJRPCCurrentRequestNotFound = 'CurrentRequest not found';
   SJRPCResponsesNotFound = 'Responses not found';
   SJRPCDuplicateFlatMethod = 'Duplicate JSON-RPC method [%s]: already registered by class [%s]';
@@ -1096,6 +1097,29 @@ begin
     raise EJRPCInvalidRequestError.Create(SJRPCInvalidRequest);
 end;
 
+{ method parsing }
+
+// Reads the "method" member of a Request/Notification object. Per JSON-RPC 2.0
+// it MUST be a String, and TJSONValue.GetValue<string> is no substitute for
+// checking: it coerces a number into its text (so 123 became the method name
+// "123", answered with a misleading -32601 "method not found") and, on an object
+// or an array, escapes as a raw RTL conversion message that ends up quoted
+// verbatim in the error sent to the client.
+//
+// A missing member is rejected here too: both serializers are only ever reached
+// for a message that is supposed to carry one.
+function ParseJRPCMethod(AMessage: TJSONValue): string;
+var
+  LMethod: TJSONValue;
+begin
+  LMethod := AMessage.GetValue<TJSONValue>('method', nil);
+  // Covers nil as well: a missing member is not a string either.
+  if not (LMethod is TJSONString) then
+    raise EJRPCInvalidRequestError.Create(SJRPCInvalidMethodMember);
+
+  Result := LMethod.Value;
+end;
+
 { params parsing }
 
 // Assigns the "params" member of a Request/Notification object. Per JSON-RPC 2.0
@@ -1139,7 +1163,7 @@ var
 begin
   LReq := AData.AsType<TJRPCRequest>;
 
-  LReq.Method := AValue.GetValue<string>('method');
+  LReq.Method := ParseJRPCMethod(AValue);
   LReq.JsonRpc := AValue.GetValue<string>('jsonrpc');
   // Per JSON-RPC 2.0 the "jsonrpc" member MUST be exactly "2.0".
   if LReq.JsonRpc <> TJRPCMessage.JSONRPC_VERSION then
@@ -1194,7 +1218,7 @@ var
 begin
   LNotif := AData.AsType<TJRPCNotification>;
 
-  LNotif.Method := AValue.GetValue<string>('method');
+  LNotif.Method := ParseJRPCMethod(AValue);
   LNotif.JsonRpc := AValue.GetValue<string>('jsonrpc');
   
   // Per JSON-RPC 2.0 the "jsonrpc" member MUST be exactly "2.0".
