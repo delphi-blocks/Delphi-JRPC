@@ -48,6 +48,7 @@ resourcestring
   SJRPCNotValidTypeForPosition = 'Not a valid type for position allowed';
   SJRPCInvalidJSONReceived = 'An invalid JSON was received by the server';
   SJRPCInvalidRequest = 'Invalid JRPC Request';
+  SJRPCInvalidParamsStructure = 'The "params" member must be an array or an object';
   SJRPCCurrentRequestNotFound = 'CurrentRequest not found';
   SJRPCResponsesNotFound = 'Responses not found';
   SJRPCDuplicateFlatMethod = 'Duplicate JSON-RPC method [%s]: already registered by class [%s]';
@@ -1095,6 +1096,32 @@ begin
     raise EJRPCInvalidRequestError.Create(SJRPCInvalidRequest);
 end;
 
+{ params parsing }
+
+// Assigns the "params" member of a Request/Notification object. Per JSON-RPC 2.0
+// params, when present, MUST be a Structured value: an Array (by-position) or an
+// Object (by-name). Anything else - a string, a number, a boolean - is not a
+// parameter structure and is rejected: silently ignoring it would let the call
+// run as if no parameters had been sent at all, which on a method that takes
+// none would answer with a plausible-looking result.
+//
+// A JSON null is accepted and treated as "no params". The spec does not list it,
+// but it is what a great many clients emit for a call that takes no parameters
+// (this library included, see TJRPCMethod.Create), and it carries no parameters
+// to misread. The instance keeps the TJSONNull its constructor installed, so
+// ParamsType/ParamsCount and the AddNamedParam/AddPositionParam paths behave as
+// they do for an omitted member.
+//
+// The value is cloned, never adopted: the parsed document belongs to the caller
+// and is freed independently of the message (see TJNotificationSerializer).
+procedure AssignJRPCParams(AMethod: TJRPCMethod; AParams: TJSONValue);
+begin
+  if (AParams is TJSONArray) or (AParams is TJSONObject) then
+    AMethod.Params := AParams.Clone as TJSONValue
+  else if not (AParams is TJSONNull) then
+    raise EJRPCInvalidParamsError.Create(SJRPCInvalidParamsStructure);
+end;
+
 { TJRequestSerializer }
 
 class function TJRequestSerializer.CanHandle(AType: PTypeInfo): Boolean;
@@ -1121,17 +1148,10 @@ begin
   if Assigned(LIdValue) then
     LReq.Id := ParseJRPCId(LIdValue);
 
-  // "params" is optional
+  // "params" is optional; when present it must be an Array (by-position) or an
+  // Object (by-name) - see AssignJRPCParams.
   if AValue.TryGetValue<TJSONValue>('params', LParams) then
-  begin
-    // Position parameters
-    if LParams is TJSONArray then
-      LReq.Params := LParams.Clone as TJSONArray;
-
-    // Named parameters
-    if LParams is TJSONObject then
-      LReq.Params := LParams.Clone as TJSONObject;
-  end;
+    AssignJRPCParams(LReq, LParams);
 
   Result := TValue.From<TJRPCRequest>(LReq);
 end;
@@ -1181,16 +1201,12 @@ begin
   if LNotif.JsonRpc <> TJRPCMessage.JSONRPC_VERSION then
     raise EJRPCInvalidRequestError.Create(SJRPCInvalidRequest);
 
-  // "params" is optional; it is cloned here (instead of going through the RTL
+  // "params" is optional; it is cloned (instead of going through the RTL
   // TJSONValueSerializer, which frees the value it replaces) so the parsed
-  // document can be freed by the caller without affecting this instance.
+  // document can be freed by the caller without affecting this instance, and it
+  // must be an Array or an Object - see AssignJRPCParams.
   if AValue.TryGetValue<TJSONValue>('params', LParams) then
-  begin
-    if LParams is TJSONArray then
-      LNotif.Params := LParams.Clone as TJSONArray
-    else if LParams is TJSONObject then
-      LNotif.Params := LParams.Clone as TJSONObject;
-  end;
+    AssignJRPCParams(LNotif, LParams);
 
   Result := TValue.From<TJRPCNotification>(LNotif);
 end;
@@ -1670,7 +1686,23 @@ begin
     end;
   except
     on E: Exception do
+    begin
       LMsg := TJRPCError.CreateFromException(E, AJSON);
+
+      // A Notification is a Request carrying no "id", and the spec forbids
+      // answering one - "Notifications are not confirmable by definition" -
+      // whether or not it turned out to be well formed. The error is still
+      // recorded so a caller walking the parsed list can see what was rejected;
+      // Request=True is what stops TJRPCServer.DispatchMessage replying to it.
+      //
+      // Both halves of the test matter. An "id" that is present but unusable
+      // (boolean, fractional, out of range) does NOT make this a notification:
+      // the client is waiting for an answer and gets one with a null id. And a
+      // message with no "method" at all was never identifiable as a
+      // notification, so "{}" is still answered rather than silently dropped.
+      if Assigned(AJSON.GetValue('method')) and not Assigned(AJSON.GetValue('id')) then
+        (LMsg as TJRPCError).Request := True;
+    end;
   end;
   AddMessage(LMsg);
 end;

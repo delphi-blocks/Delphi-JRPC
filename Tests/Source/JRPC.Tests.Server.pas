@@ -29,6 +29,12 @@ type
     [Test] procedure TestProcessRequestNotificationNoResponse;
     [Test] procedure TestProcessRequestBatch;
     [Test] procedure TestProcessRequestBatchWithInvalidElement;
+    [Test] procedure TestProcessRequestParamsNotStructuredIsInvalidParams;
+    [Test] procedure TestProcessRequestParamsNullIsTreatedAsAbsent;
+    [Test] procedure TestProcessRequestNotificationBadParamsNoResponse;
+    [Test] procedure TestProcessRequestMalformedNotificationNoResponse;
+    [Test] procedure TestProcessRequestUnparsableIdIsNotANotification;
+    [Test] procedure TestProcessRequestBatchNotificationErrorsNotAnswered;
     [Test] procedure TestProcessRequestProcedureReturnsNullResult;
     [Test] procedure TestProcessRequestProcedureNotificationNoResponse;
     [Test] procedure TestProcessRequestBatchOfOneStaysArray;
@@ -252,6 +258,132 @@ begin
       '{"jsonrpc":"2.0","id":2,"method":"math/sum","params":{"a":3,"b":4}}' +
       ']');
     Assert.IsTrue(IsArrayOfSize(LResponse, 2), 'batch answers only the requests');
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestParamsNotStructuredIsInvalidParams;
+var
+  LServer: TJRPCServer;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // "params" must be an Array or an Object. A scalar used to be discarded in
+    // silence, so a method taking no arguments answered with a plausible result
+    // instead of reporting that the call was malformed.
+    Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":"math/sum","params":"bogus"}')),
+      'a string params is rejected');
+    Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":2,"method":"math/sum","params":7}')),
+      'a number params is rejected');
+    Assert.AreEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":3,"method":"math/sum","params":true}')),
+      'a boolean params is rejected');
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestParamsNullIsTreatedAsAbsent;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // A JSON null carries no parameters to misread and is what a great many
+    // clients emit for a call that takes none, so it is accepted as "no params"
+    // rather than rejected alongside the scalars above.
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":"math/reset","params":null}');
+    Assert.AreNotEqual(JRPC_INVALID_PARAMS, ErrorCodeOf(LResponse),
+      'a null params is tolerated');
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":2,"method":"math/sum","params":{"a":1,"b":1}}');
+    Assert.AreEqual('2', GetResultValue(LResponse), 'valid params still work');
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestNotificationBadParamsNoResponse;
+var
+  LServer: TJRPCServer;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // Rejecting the params must not turn a notification into something the
+    // server answers: notifications are not confirmable, malformed or not.
+    Assert.AreEqual('', LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","method":"math/sum","params":"bogus"}'));
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestMalformedNotificationNoResponse;
+var
+  LServer: TJRPCServer;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // Same rule for every other way a notification can fail to parse.
+    Assert.AreEqual('', LServer.ProcessRequest(
+      '{"jsonrpc":"1.0","method":"math/sum","params":[1,2]}'),
+      'a notification with a bad version is not answered');
+    Assert.AreEqual('', LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","method":{"a":1}}'),
+      'a notification with a non-string method is not answered');
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestUnparsableIdIsNotANotification;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // An id that is present but unusable does not make the message a
+    // notification: the client is waiting, and gets an answer with a null id.
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","method":"math/sum","params":"bogus","id":true}');
+    Assert.AreNotEqual('', LResponse, 'a request with a bad id is still answered');
+    Assert.AreEqual(JRPC_INVALID_REQUEST, ErrorCodeOf(LResponse));
+
+    // And a message with no method was never identifiable as a notification.
+    Assert.AreNotEqual('', LServer.ProcessRequest('{}'),
+      'an unidentifiable message is still answered');
+    Assert.AreNotEqual('', LServer.ProcessRequest('{"jsonrpc":"2.0"}'),
+      'an unidentifiable message is still answered');
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestBatchNotificationErrorsNotAnswered;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // In a batch, only the request is answered - the rejected notification
+    // contributes nothing, and the reply stays an array.
+    LResponse := LServer.ProcessRequest(
+      '[' +
+      '{"jsonrpc":"2.0","id":1,"method":"math/sum","params":"bogus"},' +
+      '{"jsonrpc":"2.0","method":"math/sum","params":"bogus"}' +
+      ']');
+    Assert.IsTrue(IsArrayOfSize(LResponse, 1), 'only the request is answered');
+
+    // A batch of only rejected notifications produces no reply at all.
+    Assert.AreEqual('', LServer.ProcessRequest(
+      '[{"jsonrpc":"2.0","method":"math/sum","params":"bogus"}]'));
   finally
     LServer.Free;
   end;
