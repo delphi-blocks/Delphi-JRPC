@@ -67,6 +67,7 @@ type
     [Test] procedure TestErrorProtocolExceptionsKeepTheirMessage;
     [Test] procedure TestErrorCarriesExceptionData;
     [Test] procedure TestJRPCExceptionKeepsAConstructorChosenCode;
+    [Test] procedure TestErrorDetailsAreValidFromBirth;
     [Test] procedure TestErrorSerializeNullId;
     [Test] procedure TestErrorClone;
 
@@ -831,6 +832,66 @@ begin
     Assert.AreEqual(SJRPCInvalidJSONReceived, string(LError.Error.Message));
   finally
     LError.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestErrorDetailsAreValidFromBirth;
+var
+  LError: TJRPCError;
+  LObj, LDetails: TJSONObject;
+begin
+  // "code" and "message" are REQUIRED members. Both are nullable and Neon omits
+  // a nullable that was never assigned, so an error object nobody filled in
+  // used to serialize as {"error":{}} - nothing a client can act on.
+  LError := TJRPCError.Create;
+  try
+    LError.Id := 1;
+    LObj := ParseObject(LError.ToJson);
+    try
+      LDetails := LObj.GetValue('error') as TJSONObject;
+      Assert.IsNotNull(LDetails.GetValue('code'), 'code is present');
+      Assert.IsTrue(LDetails.GetValue('code') is TJSONNumber, 'code is a Number');
+      Assert.AreEqual(JRPC_INTERNAL_ERROR, StrToInt(LDetails.GetValue('code').Value));
+      Assert.IsNotNull(LDetails.GetValue('message'), 'message is present');
+      Assert.IsTrue(LDetails.GetValue('message') is TJSONString, 'message is a String');
+    finally
+      LObj.Free;
+    end;
+  finally
+    LError.Free;
+  end;
+
+  // Setting only one of the two still leaves the other valid.
+  LError := TJRPCError.Create;
+  try
+    LError.Id := 1;
+    LError.Error.Code := -32001;
+    LObj := ParseObject(LError.ToJson);
+    try
+      LDetails := LObj.GetValue('error') as TJSONObject;
+      Assert.AreEqual(-32001, StrToInt(LDetails.GetValue('code').Value), 'the set code wins');
+      Assert.IsNotNull(LDetails.GetValue('message'), 'message keeps its default');
+    finally
+      LObj.Free;
+    end;
+  finally
+    LError.Free;
+  end;
+
+  // A malformed error object received from a peer is normalized rather than
+  // passed on with a member missing.
+  var LMsgs := TJRPCMessages.CreateFromJson('{"jsonrpc":"2.0","error":{},"id":1}');
+  try
+    LObj := ParseObject((LMsgs.List[0] as TJRPCError).ToJson);
+    try
+      LDetails := LObj.GetValue('error') as TJSONObject;
+      Assert.IsNotNull(LDetails.GetValue('code'));
+      Assert.IsNotNull(LDetails.GetValue('message'));
+    finally
+      LObj.Free;
+    end;
+  finally
+    LMsgs.Free;
   end;
 end;
 

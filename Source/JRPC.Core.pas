@@ -324,6 +324,18 @@ type
     FData: TValue;
     FMessage: NullString;
   public
+    /// <summary>
+    ///   Starts out as a *valid* JSON-RPC error object.
+    /// </summary>
+    /// <remarks>
+    ///   "code" and "message" are REQUIRED members, but both are nullable here
+    ///   and Neon omits a nullable that was never assigned - so an error object
+    ///   nobody filled in serialized to {"error":{}}, which no client can act
+    ///   on. Defaulting them means every instance is well formed from birth;
+    ///   the callers that do set them simply overwrite these.
+    /// </remarks>
+    constructor Create;
+
     [NeonProperty('code')]
     property Code: NullInteger read FCode write FCode;
 
@@ -956,6 +968,18 @@ begin
   LParam := TNeon.ValueToJSON(AValue, JRPCNeonConfig);
   if Assigned(LParam) then
     GetPositionParams.AddElement(LParam);
+end;
+
+{ TJRPCErrorDetails }
+
+constructor TJRPCErrorDetails.Create;
+begin
+  inherited Create;
+  // An error nobody described any further is an internal one: that is the
+  // honest reading, and it keeps "code" a Number and "message" a String as the
+  // spec requires rather than leaving either member out.
+  FCode := JRPC_INTERNAL_ERROR;
+  FMessage := SJRPCUnexpectedError;
 end;
 
 { TJRPCID }
