@@ -32,6 +32,9 @@ type
     [Test] procedure TestInvokePerClassNeonConfig;
     [Test] procedure TestInvokeCustomSeparator;
     [Test] procedure TestInvokeNotificationAttribute;
+    [Test] procedure TestInvokeProcedureReturnsNullResult;
+    [Test] procedure TestInvokeProcedureWithParamsReturnsNullResult;
+    [Test] procedure TestInvokeEmptyArrayResultStaysArray;
     [Test] procedure TestInvokeMethodNotFound;
     [Test] procedure TestInvokeInvalidParamType;
     [Test] procedure TestInvokeMissingParam;
@@ -328,6 +331,90 @@ begin
       LRes := LObj.GetValue('result');
       Assert.IsNotNull(LRes, 'response must carry a result member');
       Assert.IsTrue(LRes is TJSONNull, 'notification-annotated method returns a null result');
+    finally
+      LObj.Free;
+    end;
+  finally
+    LApi.Free;
+  end;
+end;
+
+procedure TJRPCInvokerTest.TestInvokeProcedureReturnsNullResult;
+var
+  LApi: TMathApi;
+  LObj: TJSONObject;
+  LRes: TJSONValue;
+  LJson: string;
+begin
+  LApi := TMathApi.Create;
+  try
+    // A procedure has no return type: Invoke hands back an empty TValue, which
+    // used to reach TNeon.ValueToJSON and raise an access violation reported to
+    // the client as -32603. The Response must carry "result": null instead.
+    LJson := InvokeToJSON(LApi, '{"jsonrpc":"2.0","id":1,"method":"math/reset"}');
+    LObj := ParseObject(LJson);
+    try
+      Assert.IsNotNull(LObj, 'a procedure must still produce a response object');
+      Assert.IsNull(LObj.GetValue('error'), 'a procedure is not an error');
+      LRes := LObj.GetValue('result');
+      Assert.IsNotNull(LRes, 'response must carry a result member');
+      Assert.IsTrue(LRes is TJSONNull, 'a procedure returns a null result');
+    finally
+      LObj.Free;
+    end;
+  finally
+    LApi.Free;
+  end;
+end;
+
+procedure TJRPCInvokerTest.TestInvokeProcedureWithParamsReturnsNullResult;
+var
+  LApi: TMathApi;
+  LObj: TJSONObject;
+  LRes: TJSONValue;
+  LJson: string;
+begin
+  LApi := TMathApi.Create;
+  try
+    // Same, but the parameters still have to be marshaled and the id echoed.
+    LJson := InvokeToJSON(LApi,
+      '{"jsonrpc":"2.0","id":7,"method":"math/store","params":{"value":42}}');
+    LObj := ParseObject(LJson);
+    try
+      Assert.IsNotNull(LObj);
+      Assert.IsNull(LObj.GetValue('error'), 'a procedure with params is not an error');
+      LRes := LObj.GetValue('result');
+      Assert.IsNotNull(LRes, 'response must carry a result member');
+      Assert.IsTrue(LRes is TJSONNull, 'a procedure returns a null result');
+    finally
+      LObj.Free;
+    end;
+    Assert.AreEqual('7', GetIdValue(LJson), 'the id is still echoed');
+  finally
+    LApi.Free;
+  end;
+end;
+
+procedure TJRPCInvokerTest.TestInvokeEmptyArrayResultStaysArray;
+var
+  LApi: TMathApi;
+  LObj: TJSONObject;
+  LRes: TJSONValue;
+  LJson: string;
+begin
+  LApi := TMathApi.Create;
+  try
+    // Guards the predicate used to detect "no result": TValue.IsEmpty is also
+    // True for an empty dynamic array, so testing the value instead of the
+    // method's ReturnType would collapse [] into null.
+    LJson := InvokeToJSON(LApi, '{"jsonrpc":"2.0","id":1,"method":"math/emptylist"}');
+    LObj := ParseObject(LJson);
+    try
+      Assert.IsNotNull(LObj);
+      LRes := LObj.GetValue('result');
+      Assert.IsNotNull(LRes, 'response must carry a result member');
+      Assert.IsTrue(LRes is TJSONArray, 'an empty array result stays an array');
+      Assert.AreEqual(0, (LRes as TJSONArray).Count);
     finally
       LObj.Free;
     end;

@@ -211,7 +211,14 @@ begin
 
   LStopwatch := TStopwatch.StartNew;
   try
-    if TRttiUtils.HasAttribute<JRPCNotificationAttribute>(LMethod) then
+    // A procedure has no return type, so Invoke hands back an empty TValue with
+    // no TypeInfo and TNeon.ValueToJSON would dereference it. The Response still
+    // MUST carry a "result" member, so it becomes null - same as a method marked
+    // [JRPCNotification], which deliberately answers without a payload.
+    // The test is on the method's ReturnType, never on the value: TValue.IsEmpty
+    // is also True for an empty dynamic array and for a nil instance, and those
+    // have to keep serializing as [] and null respectively.
+    if (LMethod.ReturnType = nil) or TRttiUtils.HasAttribute<JRPCNotificationAttribute>(LMethod) then
       LResponse.Result := nil
     else
       LResponse.Result := TNeon.ValueToJSON(LResult, FNeonConfig);

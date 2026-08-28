@@ -29,6 +29,8 @@ type
     [Test] procedure TestProcessRequestNotificationNoResponse;
     [Test] procedure TestProcessRequestBatch;
     [Test] procedure TestProcessRequestBatchWithInvalidElement;
+    [Test] procedure TestProcessRequestProcedureReturnsNullResult;
+    [Test] procedure TestProcessRequestProcedureNotificationNoResponse;
     [Test] procedure TestProcessRequestBatchOfOneStaysArray;
     [Test] procedure TestProcessRequestBatchSingleAnswerStaysArray;
     [Test] procedure TestProcessRequestSingleStaysObject;
@@ -250,6 +252,49 @@ begin
       '{"jsonrpc":"2.0","id":2,"method":"math/sum","params":{"a":3,"b":4}}' +
       ']');
     Assert.IsTrue(IsArrayOfSize(LResponse, 2), 'batch answers only the requests');
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestProcedureReturnsNullResult;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+  LObj: TJSONObject;
+  LRes: TJSONValue;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // End to end: a void API method used to answer with an access violation
+    // wrapped in -32603 (leaking a code address to the client).
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":3,"method":"math/store","params":{"value":42}}');
+    LObj := ParseObject(LResponse);
+    try
+      Assert.IsNotNull(LObj, 'a procedure must still produce a response object');
+      Assert.IsNull(LObj.GetValue('error'), 'a procedure is not an error');
+      LRes := LObj.GetValue('result');
+      Assert.IsNotNull(LRes, 'response must carry a result member');
+      Assert.IsTrue(LRes is TJSONNull, 'a procedure returns a null result');
+    finally
+      LObj.Free;
+    end;
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestProcedureNotificationNoResponse;
+var
+  LServer: TJRPCServer;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // The same void method called without an id is a notification: still no
+    // answer at all, and still no exception on the way there.
+    Assert.AreEqual('', LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","method":"math/store","params":{"value":42}}'));
   finally
     LServer.Free;
   end;

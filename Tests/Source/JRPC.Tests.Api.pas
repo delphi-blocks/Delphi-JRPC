@@ -62,6 +62,18 @@ type
 
     [JRPCMethod('notif'), JRPCNotificationAttribute]
     function Notif([JRPCParam('a')] const a: Integer; [JRPCParam('b')] const b: Integer): Integer;
+
+    /// <summary>A procedure: no return type, so the Response carries "result": null.</summary>
+    [JRPCMethod('reset')]
+    procedure Reset;
+
+    /// <summary>Takes params but returns nothing.</summary>
+    [JRPCMethod('store')]
+    procedure Store([JRPCParam('value')] const value: Integer);
+
+    /// <summary>An empty dynamic array must stay [], not collapse to null.</summary>
+    [JRPCMethod('emptylist')]
+    function EmptyList: TArray<Integer>;
   end;
 
   /// <summary>Object results under the "object" path (default Neon casing).</summary>
@@ -171,6 +183,21 @@ end;
 function TMathApi.Sum(const a, b: Integer): Integer;
 begin
   Result := a + b;
+end;
+
+procedure TMathApi.Reset;
+begin
+  // Deliberately does nothing: the point is the missing return type.
+end;
+
+procedure TMathApi.Store(const value: Integer);
+begin
+  // Same, with parameters to marshal.
+end;
+
+function TMathApi.EmptyList: TArray<Integer>;
+begin
+  Result := [];
 end;
 
 { TObjectApi }
