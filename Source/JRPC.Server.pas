@@ -103,7 +103,7 @@ begin
     AContext.AddContent(LRequest);
 
     if not TJRPCRegistry.Instance.GetConstructorProxy(LRequest.Method, LConstructorProxy) then
-      raise EJRPCMethodNotFoundError.CreateFmt(SJRPCMethodNonFound, [LRequest.Method]);
+      raise EJRPCMethodNotFoundError.CreateFmt(SJRPCMethodNotFound, [LRequest.Method]);
 
     LInstance := LConstructorProxy.ConstructorFunc();
     // The server owns the API instance and frees it explicitly once the batch

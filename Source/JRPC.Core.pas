@@ -43,14 +43,15 @@ resourcestring
 
   // JRPC.Core
   SJRPCOnlyNamedParamsAllowed = 'Only named params are allowed';
-  SJRPCNotValidTypeForNamed = 'Not a valid type for named allowed';
+  SJRPCNotValidTypeForNamed = 'Not a valid type for named params';
   SJRPCOnlyPositionParamsAllowed = 'Only position params are allowed';
-  SJRPCNotValidTypeForPosition = 'Not a valid type for position allowed';
+  SJRPCNotValidTypeForPosition = 'Not a valid type for position params';
   SJRPCInvalidJSONReceived = 'An invalid JSON was received by the server';
   SJRPCInvalidRequest = 'Invalid JRPC Request';
   SJRPCInvalidParamsStructure = 'The "params" member must be an array or an object';
   SJRPCInvalidMethodMember = 'The "method" member must be a string';
   SJRPCUnexpectedError = 'Unexpected error while processing the request';
+  SJRPCMissingResultMember = 'A response must carry a "result" member';
   SJRPCCurrentRequestNotFound = 'CurrentRequest not found';
   SJRPCResponsesNotFound = 'Responses not found';
   SJRPCDuplicateFlatMethod = 'Duplicate JSON-RPC method [%s]: already registered by class [%s]';
@@ -68,7 +69,7 @@ resourcestring
   SJRPCInvalidParamForObject = 'Invalid parameter for object [%s]';
   SJRPCInvalidParamForArray = 'Invalid parameter for array [%s]';
   SJRPCInvalidParam = 'Invalid parameter [%s]';
-  SJRPCMethodNonFound = 'Method [%s] non found';
+  SJRPCMethodNotFound = 'Method [%s] not found';
   SJRPCInvalidMethodParameters = 'Invalid method parameters.';
   SJRPCErrorCallingApiMethod = 'Error calling Api method [%s.%s]';
   SJRPCParamIndexNotFound = 'Parameter with index "%d" not found (only %d parameters available)';
@@ -1208,6 +1209,53 @@ begin
   Result := LMethod.Value;
 end;
 
+{ version parsing }
+
+// Reads and checks the "jsonrpc" member. It MUST be exactly the string "2.0".
+// Reading it with GetValue<string> and comparing afterwards very nearly works,
+// but an absent member makes that raise EJSONException ("Value 'jsonrpc' not
+// found") - an RTL exception escaping a public CreateFromJson instead of the
+// protocol error the caller is entitled to. GetMessageType hides that on the
+// server path by checking first; the direct entry points have no such cover.
+function ParseJRPCVersion(AMessage: TJSONValue): string;
+var
+  LVersion: TJSONValue;
+begin
+  LVersion := AMessage.FindValue('jsonrpc');
+  if not (LVersion is TJSONString) or (LVersion.Value <> TJRPCMessage.JSONRPC_VERSION) then
+    raise EJRPCInvalidRequestError.Create(SJRPCInvalidRequest);
+
+  Result := LVersion.Value;
+end;
+
+{ result parsing }
+
+// Reads the "result" member of a Response object. JSON-RPC 2.0 makes it
+// REQUIRED - a Response carries exactly one of "result" and "error" - so an
+// object without one is not a Response and is rejected rather than dereferenced.
+// Reaching this with the member missing used to be an access violation: the
+// server path never does, because GetMessageType only routes an object here
+// once it has seen a "result", but TJRPCResponse.CreateFromJson goes straight
+// to the serializer and is public.
+//
+// A JSON null is a perfectly good result and is kept: "result": null is what a
+// method returning nothing answers with, and what this library itself emits for
+// a void method. FindValue is what makes that distinction possible - the generic
+// GetValue<TJSONValue>('result', nil) hands back the default for a JSON null
+// just as it does for an absent member, so it cannot tell the two apart.
+//
+// The value is cloned, never adopted: the parsed document belongs to the caller.
+function ParseJRPCResult(AMessage: TJSONValue): TJSONValue;
+var
+  LResult: TJSONValue;
+begin
+  LResult := AMessage.FindValue('result');
+  if not Assigned(LResult) then
+    raise EJRPCInvalidRequestError.Create(SJRPCMissingResultMember);
+
+  Result := LResult.Clone as TJSONValue;
+end;
+
 { params parsing }
 
 // Assigns the "params" member of a Request/Notification object. Per JSON-RPC 2.0
@@ -1252,10 +1300,7 @@ begin
   LReq := AData.AsType<TJRPCRequest>;
 
   LReq.Method := ParseJRPCMethod(AValue);
-  LReq.JsonRpc := AValue.GetValue<string>('jsonrpc');
-  // Per JSON-RPC 2.0 the "jsonrpc" member MUST be exactly "2.0".
-  if LReq.JsonRpc <> TJRPCMessage.JSONRPC_VERSION then
-    raise EJRPCInvalidRequestError.Create(SJRPCInvalidRequest);
+  LReq.JsonRpc := ParseJRPCVersion(AValue);
   LIdValue := AValue.GetValue<TJSONValue>('id', nil);
   if Assigned(LIdValue) then
     LReq.Id := ParseJRPCId(LIdValue);
@@ -1307,11 +1352,7 @@ begin
   LNotif := AData.AsType<TJRPCNotification>;
 
   LNotif.Method := ParseJRPCMethod(AValue);
-  LNotif.JsonRpc := AValue.GetValue<string>('jsonrpc');
-  
-  // Per JSON-RPC 2.0 the "jsonrpc" member MUST be exactly "2.0".
-  if LNotif.JsonRpc <> TJRPCMessage.JSONRPC_VERSION then
-    raise EJRPCInvalidRequestError.Create(SJRPCInvalidRequest);
+  LNotif.JsonRpc := ParseJRPCVersion(AValue);
 
   // "params" is optional; it is cloned (instead of going through the RTL
   // TJSONValueSerializer, which frees the value it replaces) so the parsed
@@ -2174,19 +2215,14 @@ function TJResponseSerializer.Deserialize(AValue: TJSONValue;
 var
   LIdValue: TJSONValue;
   LResponse: TJRPCResponse;
-  LResult: TJSONValue;
 begin
   LResponse := AData.AsType<TJRPCResponse>;
-  LResult := AValue.GetValue<TJSONValue>('result');
-  LResponse.Result := LResult.Clone as TJSONValue;
+  LResponse.Result := ParseJRPCResult(AValue);
 
   LIdValue := AValue.GetValue<TJSONValue>('id', nil);
   if Assigned(LIdValue) then
     LResponse.Id := ParseJRPCId(LIdValue);
-  LResponse.JsonRpc := AValue.GetValue<string>('jsonrpc');
-  // Per JSON-RPC 2.0 the "jsonrpc" member MUST be exactly "2.0".
-  if LResponse.JsonRpc <> TJRPCMessage.JSONRPC_VERSION then
-    raise EJRPCInvalidRequestError.Create(SJRPCInvalidRequest);
+  LResponse.JsonRpc := ParseJRPCVersion(AValue);
 
   Result := TValue.From<TJRPCResponse>(LResponse);
 end;

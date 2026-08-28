@@ -193,7 +193,7 @@ begin
   LStopwatch := TStopwatch.StartNew;
   LMethod := FindMethod(FContext.Request);
   if not Assigned(LMethod) then
-    raise EJRPCMethodNotFoundError.CreateFmt(SJRPCMethodNonFound, [FContext.Request.Method]);
+    raise EJRPCMethodNotFoundError.CreateFmt(SJRPCMethodNotFound, [FContext.Request.Method]);
   Logger.LogDebug('[PERF] JRPC [%s] FindMethod: %d ms', [FContext.Request.Method, LStopwatch.ElapsedMilliseconds]);
 
   LStopwatch := TStopwatch.StartNew;

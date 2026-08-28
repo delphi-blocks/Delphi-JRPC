@@ -485,7 +485,7 @@ var
   LError: TJRPCError;
   E: EJRPCException;
 begin
-  E := EJRPCMethodNotFoundError.CreateFmt('Method [%s] non found', ['math/nope']);
+  E := EJRPCMethodNotFoundError.CreateFmt('Method [%s] not found', ['math/nope']);
   try
     LError := TJRPCInvoker.HandleError(E, 8);
     try
@@ -586,7 +586,7 @@ begin
   // malformed or that the server had failed depending only on where it broke.
   AssertSame(Exception.Create('boom'), 'an unexpected exception');
   AssertSame(EInvalidCast.Create('cast'), 'an RTL exception');
-  AssertSame(EJRPCMethodNotFoundError.Create('Method [x] non found'),
+  AssertSame(EJRPCMethodNotFoundError.Create('Method [x] not found'),
     'a method-not-found error');
   AssertSame(EJRPCInvalidParamsError.Create('Invalid method parameters.'),
     'an invalid-params error');

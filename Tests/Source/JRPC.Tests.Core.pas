@@ -58,6 +58,9 @@ type
     [Test] procedure TestResponseSerializeResult;
     [Test] procedure TestResponseDeserializeRoundTrip;
     [Test] procedure TestResponseNullIdRoundTrip;
+    [Test] procedure TestResponseCreateFromJsonRejectsMissingResult;
+    [Test] procedure TestResponseNullResultIsAccepted;
+    [Test] procedure TestCreateFromJsonRejectsMissingVersionCleanly;
 
     // TJRPCError
     [Test] procedure TestErrorCreateFromJRPCException;
@@ -676,6 +679,104 @@ begin
   end;
 end;
 
+procedure TJRPCMessageTest.TestResponseCreateFromJsonRejectsMissingResult;
+begin
+  // "result" is REQUIRED on a Response. The server path never reaches the
+  // serializer without one - GetMessageType only routes an object here once it
+  // has seen the member - but CreateFromJson goes straight there and is public,
+  // where the missing member used to be dereferenced into an access violation.
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCResponse.CreateFromJson('{"jsonrpc":"2.0","id":1}').Free;
+    end,
+    EJRPCInvalidRequestError);
+
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCResponse.CreateFromJson('{}').Free;
+    end,
+    EJRPCInvalidRequestError);
+
+  // An error object is not a Response either.
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCResponse.CreateFromJson(
+        '{"jsonrpc":"2.0","error":{"code":-1,"message":"x"},"id":1}').Free;
+    end,
+    EJRPCInvalidRequestError);
+end;
+
+procedure TJRPCMessageTest.TestResponseNullResultIsAccepted;
+var
+  LResponse: TJRPCResponse;
+  LObj: TJSONObject;
+begin
+  // "result": null is a valid result - it is what a void method answers with,
+  // and what this library emits for one - so it must not be mistaken for an
+  // absent member. (TJSONValue.GetValue<T>(path, nil) cannot tell the two
+  // apart, which is why the parser uses FindValue.)
+  LResponse := TJRPCResponse.CreateFromJson('{"jsonrpc":"2.0","result":null,"id":1}');
+  try
+    Assert.IsNotNull(LResponse.Result, 'the null result is kept');
+    Assert.IsTrue(LResponse.Result is TJSONNull);
+    LObj := ParseObject(LResponse.ToJson);
+    try
+      Assert.IsNotNull(LObj.GetValue('result'), 'and round-trips back out');
+      Assert.IsTrue(LObj.GetValue('result') is TJSONNull);
+    finally
+      LObj.Free;
+    end;
+  finally
+    LResponse.Free;
+  end;
+
+  // Other falsy results are unaffected.
+  LResponse := TJRPCResponse.CreateFromJson('{"jsonrpc":"2.0","result":false,"id":1}');
+  try
+    Assert.AreEqual('false', LResponse.Result.Value);
+  finally
+    LResponse.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestCreateFromJsonRejectsMissingVersionCleanly;
+begin
+  // A missing "jsonrpc" used to escape the public entry points as a raw RTL
+  // EJSONException ("Value 'jsonrpc' not found") rather than a protocol error.
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCRequest.CreateFromJson('{"method":"m","id":1}').Free;
+    end,
+    EJRPCInvalidRequestError);
+
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCResponse.CreateFromJson('{"result":7,"id":1}').Free;
+    end,
+    EJRPCInvalidRequestError);
+
+  // A wrong version is still rejected the same way.
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCRequest.CreateFromJson('{"jsonrpc":"1.0","method":"m","id":1}').Free;
+    end,
+    EJRPCInvalidRequestError);
+
+  // ...and a non-string version too.
+  Assert.WillRaise(
+    procedure
+    begin
+      TJRPCRequest.CreateFromJson('{"jsonrpc":2.0,"method":"m","id":1}').Free;
+    end,
+    EJRPCInvalidRequestError);
+end;
+
 procedure TJRPCMessageTest.TestErrorCreateFromJRPCException;
 var
   LError: TJRPCError;
@@ -816,10 +917,10 @@ begin
   // Only the unexpected-exception branch is muted. JSON-RPC exceptions carry
   // messages the library wrote on purpose, and the client still gets them.
   LError := TJRPCError.CreateFromException(
-    EJRPCMethodNotFoundError.Create('Method [x] non found'), 1);
+    EJRPCMethodNotFoundError.Create('Method [x] not found'), 1);
   try
     Assert.AreEqual(JRPC_METHOD_NOT_FOUND, Integer(LError.Error.Code));
-    Assert.AreEqual('Method [x] non found', string(LError.Error.Message));
+    Assert.AreEqual('Method [x] not found', string(LError.Error.Message));
     Assert.IsTrue(LError.Error.Data.IsEmpty);
   finally
     LError.Free;

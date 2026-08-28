@@ -274,7 +274,7 @@ begin
   LServer := TJRPCServer.Create(nil);
   try
     // "method" MUST be a String. A number used to be coerced into its text and
-    // answered with a misleading -32601 "Method [123] non found", as if the
+    // answered with a misleading -32601 "Method [123] not found", as if the
     // client had asked for a method that merely happened not to exist.
     Assert.AreEqual(JRPC_INVALID_REQUEST, ErrorCodeOf(LServer.ProcessRequest(
       '{"jsonrpc":"2.0","id":1,"method":123}')), 'a number method is rejected');
