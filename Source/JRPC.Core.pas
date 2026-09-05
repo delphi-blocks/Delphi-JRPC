@@ -223,7 +223,29 @@ type
     class operator Implicit(const ASource: TJRPCID): Integer;
     class operator Implicit(const ASource: TJRPCID): string;
 
+    /// <summary>
+    ///   True when the id is absent (a Notification, or the null id of an error
+    ///   answering a message that could not be parsed).
+    /// </summary>
     function IsNull: Boolean;
+
+    /// <summary>
+    ///   True when the id is a JSON string.
+    /// </summary>
+    /// <remarks>
+    ///   The pair with IsInteger is what lets a server echo an id back in the
+    ///   type it arrived as. AsString will happily render a numeric id as text,
+    ///   so it cannot be used to tell the two apart: the string "7" and the
+    ///   number 7 both come back as '7'.
+    /// </remarks>
+    function IsString: Boolean;
+
+    /// <summary>
+    ///   True when the id is a JSON number, which is exactly when AsInteger
+    ///   returns the id rather than its 0 fallback.
+    /// </summary>
+    function IsInteger: Boolean;
+
     function AsInteger: Integer;
     function AsString: string;
   end;
@@ -1035,6 +1057,19 @@ end;
 function TJRPCID.IsNull: Boolean;
 begin
   Result := id.IsEmpty;
+end;
+
+function TJRPCID.IsString: Boolean;
+begin
+  // Mirrors the first branch of AsString.
+  Result := not id.IsEmpty and id.IsType<string>;
+end;
+
+function TJRPCID.IsInteger: Boolean;
+begin
+  // Mirrors the test AsInteger makes before returning the value: whenever this
+  // is False, AsInteger yields 0 because there is no number to give back.
+  Result := not id.IsEmpty and id.IsOrdinal;
 end;
 
 class operator TJRPCID.Implicit(const ASource: TJRPCID): Integer;
