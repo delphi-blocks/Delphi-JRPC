@@ -91,6 +91,20 @@ type
     function ToJSON: string;
 
     /// <summary>
+    ///   Builds the optional "data" member of the JSON-RPC error object this
+    ///   exception maps to, or nil when the error carries no structured data.
+    /// </summary>
+    /// <remarks>
+    ///   The caller takes ownership of what comes back. The base implementation
+    ///   returns nil, and the Data string below is used instead; only an error
+    ///   whose specification defines a structured payload overrides this, and
+    ///   when it does, the object wins over the string. A protocol layered on
+    ///   JSON-RPC is the usual reason to need it - MCP defines object payloads
+    ///   for several of its errors.
+    /// </remarks>
+    function CreateErrorData: TJSONObject; virtual;
+
+    /// <summary>
     ///   The JSON-RPC error code.
     /// </summary>
     property Code: Integer read FCode;
@@ -346,7 +360,10 @@ type
     FCode: NullInteger;
     FData: TValue;
     FMessage: NullString;
+    procedure SetData(const AValue: TValue);
   public
+    destructor Destroy; override;
+
     /// <summary>
     ///   Starts out as a *valid* JSON-RPC error object.
     /// </summary>
@@ -365,8 +382,15 @@ type
     [NeonProperty('message')]
     property Message: NullString read FMessage write FMessage;
 
+    /// <summary>
+    ///   Additional information about the error, defined by the sender.
+    /// </summary>
+    /// <remarks>
+    ///   When the value holds an object - as it does for the errors that define
+    ///   a structured "data" payload - the details object owns it and frees it.
+    /// </remarks>
     [NeonProperty('data'), NeonInclude(IncludeIf.NotNull)]
-    property Data: TValue read FData write FData;
+    property Data: TValue read FData write SetData;
   end;
 
   /// <summary>
@@ -1005,6 +1029,23 @@ begin
   FMessage := SJRPCUnexpectedError;
 end;
 
+destructor TJRPCErrorDetails.Destroy;
+begin
+  if FData.IsObject then
+    FData.AsObject.Free;
+  inherited;
+end;
+
+procedure TJRPCErrorDetails.SetData(const AValue: TValue);
+begin
+  // An object-valued "data" is owned here: free the one being replaced, unless
+  // the very same instance is assigned back onto itself.
+  if FData.IsObject and not (AValue.IsObject and (AValue.AsObject = FData.AsObject)) then
+    FData.AsObject.Free;
+
+  FData := AValue;
+end;
+
 { TJRPCID }
 
 class operator TJRPCID.Implicit(ASource: Integer): TJRPCID;
@@ -1187,7 +1228,12 @@ begin
     if not Assigned(TRttiUtils.Context.GetType(LValue.TypeInfo)) then
       Exit(nil);
 
-    Result := AContext.WriteDataMember(AValue.AsType<TValue>, False)
+    // Custom serializers stay enabled for everything but a nested TValue (which
+    // would come straight back here): without them a payload such as the
+    // TJSONObject of an error "data" member is written as the properties of the
+    // TJSONObject class - {"count":2,"isEmpty":false,...} - instead of as the
+    // JSON it holds.
+    Result := AContext.WriteDataMember(LValue, LValue.TypeInfo <> TypeInfo(TValue));
   end;
 end;
 
@@ -1700,6 +1746,11 @@ begin
     FCode := JRPC_INTERNAL_ERROR;
 end;
 
+function EJRPCException.CreateErrorData: TJSONObject;
+begin
+  Result := nil;
+end;
+
 function EJRPCException.ToJSON: string;
 var
   LErrorNeonConfig: INeonConfiguration;
@@ -2086,7 +2137,15 @@ begin
   Result.Id := FId;
   Result.Error.Code := FError.Code;
   Result.Error.Message := FError.Message;
-  Result.Error.Data := FError.Data;
+
+  // "data" is owned by the details object, so the clone needs its own copy and
+  // never a shared pointer: JSON payloads are cloned, plain values copied, and
+  // an object of any other kind (which nothing produces today) is left out
+  // rather than handed to a second owner.
+  if not FError.Data.IsObject then
+    Result.Error.Data := FError.Data
+  else if FError.Data.AsObject is TJSONObject then
+    Result.Error.Data := TValue.From<TJSONObject>(TJSONObject(FError.Data.AsObject).Clone as TJSONObject);
 end;
 
 constructor TJRPCError.Create;
@@ -2149,9 +2208,15 @@ begin
     Result.Id := AId;
     Result.Error.Code := EJRPCException(E).Code;
     Result.Error.Message := E.Message;
+
     // "data" is emitted only when the exception actually carried a detail, so
-    // the member stays absent rather than turning up empty.
-    if EJRPCException(E).Data <> '' then
+    // the member stays absent rather than turning up empty. A structured
+    // payload wins over the string one: an error that defines an object shape
+    // for "data" cannot say the same thing in a string.
+    var LData := EJRPCException(E).CreateErrorData;
+    if Assigned(LData) then
+      Result.Error.Data := TValue.From<TJSONObject>(LData)
+    else if EJRPCException(E).Data <> '' then
       Result.Error.Data := EJRPCException(E).Data;
   end
   else if E is EJSONParseException then
