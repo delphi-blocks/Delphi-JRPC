@@ -114,6 +114,9 @@ type
     [Test] procedure TestContextGetMissingRaises;
     [Test] procedure TestContextInjectClassField;
     [Test] procedure TestContextInjectInterfaceField;
+    [Test] procedure TestContextInjectRequiredMissingRaises;
+    [Test] procedure TestContextInjectOptionalMissingLeavesNil;
+    [Test] procedure TestContextInjectOptionalIsInjectedWhenPresent;
 
     // TRouteMatcher
     [Test] procedure TestRouteMatcherMatch;
@@ -155,6 +158,19 @@ type
   private
     [Context] FData: TContextData;
     [Context] FMarker: IContextMarker;
+  public
+    property Data: TContextData read FData;
+    property Marker: IContextMarker read FMarker;
+  end;
+
+  /// <summary>
+  ///   Injection target whose fields are both optional: what the context
+  ///   cannot resolve is left nil instead of raising.
+  /// </summary>
+  TOptionalContextTarget = class
+  private
+    [Context([TContextOption.Optional])] FData: TContextData;
+    [Context([TContextOption.Optional])] FMarker: IContextMarker;
   public
     property Data: TContextData read FData;
     property Marker: IContextMarker read FMarker;
@@ -1497,6 +1513,77 @@ begin
     LContext.Inject(LTarget);
     Assert.IsNotNull(LTarget.Marker);
     Assert.AreEqual(9, LTarget.Marker.Id);
+  finally
+    LMarker := nil;
+    LData.Free;
+    LTarget.Free;
+    LContext.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestContextInjectRequiredMissingRaises;
+var
+  LContext: TContextManager;
+  LTarget: TContextTarget;
+begin
+  LContext := TContextManager.Create;
+  LTarget := TContextTarget.Create;
+  try
+    // A plain [Context] field says the object has to be there
+    Assert.WillRaise(
+      procedure
+      begin
+        LContext.Inject(LTarget);
+      end,
+      ECtxException);
+  finally
+    LTarget.Free;
+    LContext.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestContextInjectOptionalMissingLeavesNil;
+var
+  LContext: TContextManager;
+  LTarget: TOptionalContextTarget;
+begin
+  LContext := TContextManager.Create;
+  LTarget := TOptionalContextTarget.Create;
+  try
+    // Nothing in the context, and both kinds of field survive it
+    LContext.Inject(LTarget);
+
+    Assert.IsNull(LTarget.Data);
+    Assert.IsNull(LTarget.Marker);
+  finally
+    LTarget.Free;
+    LContext.Free;
+  end;
+end;
+
+procedure TJRPCMessageTest.TestContextInjectOptionalIsInjectedWhenPresent;
+var
+  LContext: TContextManager;
+  LTarget: TOptionalContextTarget;
+  LData: TContextData;
+  LMarker: IContextMarker;
+begin
+  LContext := TContextManager.Create;
+  LTarget := TOptionalContextTarget.Create;
+  LData := TContextData.Create;
+  LMarker := TContextMarker.Create(5);
+  try
+    LData.Value := 3;
+    LContext.AddContent(LData);
+    LContext.AddContent(LMarker);
+
+    // Optional says what happens when it is missing, and nothing else
+    LContext.Inject(LTarget);
+
+    Assert.IsNotNull(LTarget.Data);
+    Assert.AreEqual(3, LTarget.Data.Value);
+    Assert.IsNotNull(LTarget.Marker);
+    Assert.AreEqual(5, LTarget.Marker.Id);
   finally
     LMarker := nil;
     LData.Free;

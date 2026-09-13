@@ -244,10 +244,43 @@ type
   end;
 
 
+{$SCOPEDENUMS ON}
+  /// <summary>
+  ///   How a [Context] field is injected.
+  /// </summary>
+  TContextOption = (
+    /// <summary>
+    ///   A field the context cannot resolve is left nil instead of raising.
+    ///   For an object that is only in the context of some requests: one a
+    ///   middleware puts there under conditions of its own, or one that belongs
+    ///   to a feature the server did not turn on.
+    /// </summary>
+    Optional
+  );
+  TContextOptions = set of TContextOption;
+{$SCOPEDENUMS OFF}
+
   /// <summary>
   ///   Attribute used to mark a field for context injection
   /// </summary>
-  ContextAttribute = class(TCustomAttribute);
+  /// <example>
+  ///   <code>
+  ///   [Context] Config: TMCPConfig;                          // must be there
+  ///   [Context([TContextOption.Optional])] Meta: TMetaObject; // nil when not
+  ///   </code>
+  /// </example>
+  ContextAttribute = class(TCustomAttribute)
+  private
+    FOptions: TContextOptions;
+  public
+    constructor Create(AOptions: TContextOptions = []);
+
+    /// <summary>
+    ///   What was asked of the injection. Empty - the plain [Context] - means
+    ///   the field is required.
+    /// </summary>
+    property Options: TContextOptions read FOptions;
+  end;
 
   ECtxException = class(Exception);
 
@@ -534,6 +567,14 @@ begin
       FParams.Add(LName, TNetEncoding.URL.Decode(LMatch.Groups[LName].Value));
 end;
 
+{ ContextAttribute }
+
+constructor ContextAttribute.Create(AOptions: TContextOptions);
+begin
+  inherited Create;
+  FOptions := AOptions;
+end;
+
 { TContextManager }
 
 procedure TContextManager.AddContent(AObject: TObject);
@@ -618,18 +659,60 @@ begin
     function (AField: TRttiField; AAttr: ContextAttribute): Boolean
     var
       LValue: TValue;
+      LObject: TObject;
+      LOptional: Boolean;
+
+      // A nil of the field's own type: TValue.Make and not a bare nil object,
+      // so that an interface field is left with a nil interface rather than
+      // with an object reference it cannot hold.
+      procedure SetNil;
+      var
+        LNil: TValue;
+      begin
+        TValue.Make(nil, AField.FieldType.Handle, LNil);
+        AField.SetValue(AObject, LNil);
+      end;
+
     begin
+      // Find... answers nil where Get... raises, which is the whole of what
+      // the option changes: an absent object leaves a nil field, and the class
+      // that asked for it is the one that knows what to do about that.
+      LOptional := TContextOption.Optional in AAttr.Options;
+      Result := True;
+
       if AField.FieldType is TRttiInstanceType then
       begin
-        LValue := GetContextDataAs(TRttiInstanceType(AField.FieldType).MetaclassType);
+        if LOptional then
+        begin
+          LObject := FindContextDataAs(TRttiInstanceType(AField.FieldType).MetaclassType);
+          if not Assigned(LObject) then
+          begin
+            SetNil();
+            Exit;
+          end;
+          LValue := LObject;
+        end
+        else
+          LValue := GetContextDataAs(TRttiInstanceType(AField.FieldType).MetaclassType);
+
         AField.SetValue(AObject, LValue);
-        Result := True;
       end
       else if AField.FieldType is TRttiInterfaceType then
       begin
-        LValue := GetContextDataAs(TRttiInterfaceType(AField.FieldType).GUID) as TObject;
+        if LOptional then
+        begin
+          LObject := FindContextDataAs(TRttiInterfaceType(AField.FieldType).GUID) as TObject;
+          if not Assigned(LObject) then
+          begin
+            SetNil();
+            Exit;
+          end;
+          LValue := LObject;
+        end
+        else
+          LValue := GetContextDataAs(TRttiInterfaceType(AField.FieldType).GUID) as TObject;
+
         AField.SetValue(AObject, LValue);
-        Result := True;
       end
       else
         raise ECtxException.Create(SJRPCContextVarsInvalid);
