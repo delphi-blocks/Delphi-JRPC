@@ -103,6 +103,7 @@
             <MainSource>MainSource</MainSource>
         </DelphiCompile>
         <DCCReference Include="Source\JRPC.Tests.Api.pas"/>
+        <DCCReference Include="Source\JRPC.Tests.Client.pas"/>
         <DCCReference Include="Source\JRPC.Tests.Core.pas"/>
         <DCCReference Include="Source\JRPC.Tests.Example.pas"/>
         <DCCReference Include="Source\JRPC.Tests.Invoker.pas"/>

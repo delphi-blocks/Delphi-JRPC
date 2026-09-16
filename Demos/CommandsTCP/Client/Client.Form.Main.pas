@@ -1,4 +1,4 @@
-{******************************************************************************}
+﻿{******************************************************************************}
 {                                                                              }
 {  Delphi-JRPC - JSON-RPC 2.0 Library for Delphi                               }
 {                                                                              }
@@ -11,9 +11,11 @@
 {******************************************************************************}
 
 /// <summary>
-///   The client half: builds a JSON-RPC request with TJRPCRequest, writes it
-///   as one line, reads one line back. Calls are synchronous - write, read,
-///   done - which is the whole point of this demo. See README.md.
+///   The client half. TJRPCClient builds the request, correlates the answer
+///   and turns an "error" member into an exception; this form only has to say
+///   how a line gets to the socket and back, which it does once in FormCreate.
+///   Calls are synchronous - write, read, done - which is the whole point of
+///   this demo. See README.md.
 /// </summary>
 unit Client.Form.Main;
 
@@ -25,13 +27,33 @@ uses
   Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, Vcl.ExtCtrls,
   IdBaseComponent, IdComponent, IdTCPConnection, IdTCPClient, IdGlobal, IdException,
 
-  JRPC.Core;
+  JRPC.Core,
+  JRPC.Client;
 
 const
   MAX_LINE_LENGTH = 1024 * 1024;
   READ_TIMEOUT_MS = 5000;
 
 type
+  /// <summary>
+  ///   One entry of a "dir/list" result, declared client-side.
+  /// </summary>
+  /// <remarks>
+  ///   Deliberately a copy of the server's TDirEntry rather than a reference to
+  ///   it: a client knows the wire contract, not the server's units. Only the
+  ///   members it actually reads need to be here, and Neon ignores the rest.
+  /// </remarks>
+  TDirEntry = class
+  private
+    FName: string;
+    FSize: Int64;
+    FModified: string;
+  public
+    property Name: string read FName write FName;
+    property Size: Int64 read FSize write FSize;
+    property Modified: string read FModified write FModified;
+  end;
+
   TClientForm = class(TForm)
     tcpClient: TIdTCPClient;
     pnlTop: TPanel;
@@ -71,13 +93,13 @@ type
     procedure btnSendRawClick(Sender: TObject);
     procedure btnClearClick(Sender: TObject);
   private
-    FLastId: Integer;
+    FJRPCClient: TJRPCClient;
     procedure Log(const AText: string);
     procedure UpdateUI;
-    /// <summary>Writes one line, reads one line, logs both.</summary>
-    function SendLine(const AJSON: string): string;
-    /// <summary>Builds a request with no parameters and sends it.</summary>
-    procedure CallSimple(const AMethod: string);
+    /// <summary>Raises unless the socket is up, so no call starts blind.</summary>
+    procedure CheckConnected;
+    /// <summary>Logs a failure, telling a server error from a local one.</summary>
+    procedure LogError(E: Exception);
   end;
 
 var
@@ -91,6 +113,51 @@ implementation
 
 procedure TClientForm.FormCreate(Sender: TObject);
 begin
+  FJRPCClient := TJRPCClient.Create(Self);
+
+  // The Indy pair *is* the transport: one line out, one line back. This is the
+  // only place in the form that touches the socket.
+  FJRPCClient.OnTransport :=
+    function(const ARequest: string): string
+    begin
+      CheckConnected;
+      tcpClient.IOHandler.WriteLn(ARequest, IndyTextEncoding_UTF8);
+      Result := tcpClient.IOHandler.ReadLn(IndyTextEncoding_UTF8);
+
+      if tcpClient.IOHandler.ReadLnTimedout then
+        raise EJRPCClientError.Create('timed out waiting for the answer');
+    end;
+
+  // A notification must not read: per the spec the server answers nothing at
+  // all, so a ReadLn here would block until the timeout.
+  FJRPCClient.OnNotify :=
+    procedure(const ARequest: string)
+    begin
+      CheckConnected;
+      tcpClient.IOHandler.WriteLn(ARequest, IndyTextEncoding_UTF8);
+    end;
+
+  FJRPCClient.OnBeforeSend :=
+    procedure(const AJSON: string)
+    begin
+      Log('--> ' + AJSON);
+    end;
+
+  FJRPCClient.OnAfterReceive :=
+    procedure(const AJSON: string)
+    begin
+      Log('<-- ' + AJSON);
+    end;
+
+  // One place for every failure, so no handler below repeats the logging.
+  // OnError only reports: the exception still leaves the call, and reaches the
+  // VCL handler when a button click does not catch it.
+  FJRPCClient.OnError :=
+    procedure(E: Exception)
+    begin
+      LogError(E);
+    end;
+
   edtPath.Text := TPath.GetTempPath;
   UpdateUI;
 end;
@@ -124,47 +191,23 @@ begin
     lblStatus.Caption := 'not connected';
 end;
 
-function TClientForm.SendLine(const AJSON: string): string;
+procedure TClientForm.CheckConnected;
 begin
-  Result := '';
   if not tcpClient.Connected then
-  begin
-    Log('!!! not connected');
-    Exit;
-  end;
-
-  Log('--> ' + AJSON);
-  try
-    tcpClient.IOHandler.WriteLn(AJSON, IndyTextEncoding_UTF8);
-    Result := tcpClient.IOHandler.ReadLn(IndyTextEncoding_UTF8);
-
-    if tcpClient.IOHandler.ReadLnTimedout then
-      Log('!!! timed out waiting for the answer')
-    else
-      Log('<-- ' + Result);
-  except
-    on E: Exception do
-    begin
-      Log(Format('!!! %s: %s', [E.ClassName, E.Message]));
-      if not tcpClient.Connected then
-        UpdateUI;
-    end;
-  end;
+    raise EJRPCClientError.Create('not connected');
 end;
 
-procedure TClientForm.CallSimple(const AMethod: string);
-var
-  LRequest: TJRPCRequest;
+procedure TClientForm.LogError(E: Exception);
 begin
-  LRequest := TJRPCRequest.Create;
-  try
-    Inc(FLastId);
-    LRequest.Id := FLastId;
-    LRequest.Method := AMethod;
-    SendLine(LRequest.ToJson);
-  finally
-    LRequest.Free;
-  end;
+  // The distinction the old SendLine could not make: the call reached the
+  // server and it said no, versus the call never completed.
+  if E is EJRPCRemoteError then
+    Log(Format('!!! server error %d: %s', [EJRPCRemoteError(E).Code, E.Message]))
+  else
+    Log(Format('!!! %s: %s', [E.ClassName, E.Message]));
+
+  if not tcpClient.Connected then
+    UpdateUI;
 end;
 
 procedure TClientForm.btnConnectClick(Sender: TObject);
@@ -194,49 +237,59 @@ end;
 
 procedure TClientForm.btnPingClick(Sender: TObject);
 begin
-  CallSimple('ping');
+  var LRequest := TJRPCRequestBuilder.New
+    .SetMethod('ping');
+
+  Log('    = ' + FJRPCClient.ExecuteAs<string>(LRequest));
 end;
 
 procedure TClientForm.btnInfoClick(Sender: TObject);
 begin
-  CallSimple('sys/info');
+  var LRequest := TJRPCRequestBuilder.New
+    .SetMethod('sys/info');
+
+  Log('    = ' + FJRPCClient.ExecuteAs<string>(LRequest));
 end;
 
 procedure TClientForm.btnTimeClick(Sender: TObject);
 begin
-  CallSimple('sys/time');
+  var LRequest := TJRPCRequestBuilder.New
+    .SetMethod('sys/time');
+
+  Log('    = ' + FJRPCClient.ExecuteAs<string>(LRequest));
 end;
 
 procedure TClientForm.btnEchoClick(Sender: TObject);
-var
-  LRequest: TJRPCRequest;
 begin
-  LRequest := TJRPCRequest.Create;
-  try
-    Inc(FLastId);
-    LRequest.Id := FLastId;
-    LRequest.Method := 'echo';
-    // AddNamedParam builds the "params" object for us.
-    LRequest.AddNamedParam('text', edtEcho.Text);
-    SendLine(LRequest.ToJson);
-  finally
-    LRequest.Free;
-  end;
+  var LRequest := TJRPCRequestBuilder.New
+    .SetMethod('echo')
+    .AddNamedParam('text', edtEcho.Text);
+
+  Log('    = ' + FJRPCClient.ExecuteAs<string>(LRequest));
 end;
 
 procedure TClientForm.btnDirClick(Sender: TObject);
 var
-  LRequest: TJRPCRequest;
+  LEntries: TArray<TDirEntry>;
+  LEntry: TDirEntry;
 begin
-  LRequest := TJRPCRequest.Create;
+  var LRequest := TJRPCRequest.Create;
   try
-    Inc(FLastId);
-    LRequest.Id := FLastId;
     LRequest.Method := 'dir/list';
-    // Every parameter is required: a missing one is -32602, not a default.
     LRequest.AddNamedParam('path', edtPath.Text);
     LRequest.AddNamedParam('mask', edtMask.Text);
-    SendLine(LRequest.ToJson);
+    // Every parameter is required: a missing one is -32602, not a default.
+    LEntries := FJRPCClient.ExecuteAs<TArray<TDirEntry>>(LRequest);
+    try
+      for LEntry in LEntries do
+        Log(Format('    %-30s %10d  %s', [LEntry.Name, LEntry.Size, LEntry.Modified]));
+
+      if Length(LEntries) = 0 then
+        Log('    (no matching file)');
+    finally
+      for LEntry in LEntries do
+        LEntry.Free;
+    end;
   finally
     LRequest.Free;
   end;
@@ -245,9 +298,13 @@ end;
 procedure TClientForm.btnSendRawClick(Sender: TObject);
 begin
   // Anything typed here goes out untouched: handy for provoking -32700,
-  // -32600 and -32601 by hand.
-  if Trim(edtRaw.Text) <> '' then
-    SendLine(edtRaw.Text);
+  // -32600 and -32601 by hand. ExecuteRaw skips the building, the parsing and
+  // the id check for exactly that reason - so the error comes back as a logged
+  // reply rather than through OnError.
+  if Trim(edtRaw.Text) = '' then
+    Exit;
+
+  FJRPCClient.ExecuteRaw(edtRaw.Text);
 end;
 
 procedure TClientForm.btnClearClick(Sender: TObject);
