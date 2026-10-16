@@ -808,6 +808,7 @@ type
   private
     FOnEnqueue: TQueueEvent<T>;
     FOnDequeue: TQueueEvent<T>;
+    FCloseOnDrop: Boolean;
     function GetClosed: Boolean;
   protected
     FEvent: TEvent;
@@ -842,6 +843,16 @@ type
     ///   True once Close has been called: the producer is done with this queue.
     /// </summary>
     property Closed: Boolean read GetClosed;
+
+    /// <summary>
+    ///   Whether overflowing the cap closes the queue as well as dropping the
+    ///   oldest message. False by default: for a request-scoped channel a drop
+    ///   is a backpressure policy the request is about to make irrelevant
+    ///   anyway, while a queue whose consumer must be told that it lost
+    ///   something - a subscription's, where every message is an invalidation
+    ///   the client will otherwise never hear about - sets it.
+    /// </summary>
+    property CloseOnDrop: Boolean read FCloseOnDrop write FCloseOnDrop;
 
     property OnEnqueue: TQueueEvent<T> read FOnEnqueue write FOnEnqueue;
     property OnDequeue: TQueueEvent<T> read FOnDequeue write FOnDequeue;
@@ -2423,9 +2434,16 @@ begin
   Lock;
   try
     // Cap-and-drop: when full, free the oldest item to avoid leaking it
-    // (the queue owns the messages — see Destroy).
+    // (the queue owns the messages — see Destroy). CloseOnDrop decides whether
+    // the consumer is also told: a request-scoped channel drops quietly, a
+    // subscription's closes so its pump ends the stream rather than leave the
+    // client with an invalidation it will never receive.
     if FQueue.Count = FMaxItems then
+    begin
       FQueue.Dequeue.Free;
+      if FCloseOnDrop then
+        FClosed := True;
+    end;
 
     FQueue.Enqueue(Value);
     FEvent.SetEvent;
