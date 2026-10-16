@@ -16,7 +16,8 @@ A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI 
 - **Flexible Routing**: `TRouteMatcher` for URI-style template matching and parameter extraction.
 - **Flexible Naming**: `path` + separator + `method`, a custom separator, or *flat* classes (`[JRPCPath('')]`) whose methods declare the full name (`tools/call`).
 - **High Performance**: powered by [Neon](https://github.com/paolo-rossi/delphi-neon), with built-in **TStopwatch [PERF] instrumentation** in the invoker and the server.
-- **Transport Agnostic**: integrate into any transport layer (HTTP, WebSockets, named pipes, STDIO).
+- **Transport Agnostic**: integrate into any transport layer (HTTP, WebSockets, named pipes, STDIO) — on both sides: `TJRPCServer` takes a string and returns one, `TJRPCClient` is handed a function that does the same.
+- **Typed Client**: call a remote method and get a Delphi value back — `ExecuteAs<T>` deserializes `result` through Neon, and an `error` member arrives as an exception.
 - **Batch Processing**: multiple requests in a single batch.
 - **Notification Support**: full JSON-RPC notification pattern.
 
@@ -28,6 +29,7 @@ A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI 
 | **JRPC.Invoker** | Maps JSON-RPC requests to Delphi method calls using RTTI and attributes. |
 | **JRPC.Classes** | Supporting utilities: garbage collection, context management, route matching. |
 | **JRPC.Server** | Transport-agnostic server component (`TJRPCServer`) that parses, dispatches and answers requests, including batches. |
+| **JRPC.Client** | Transport-agnostic client component (`TJRPCClient`): builds requests, correlates answers by id, deserializes `result` into a Delphi type and raises the peer's `error`. |
 
 ## 🛠️ Quick Start
 
@@ -77,25 +79,58 @@ begin
 end;
 ```
 
-``ProcessRequest`` answers a single request with a single Response object, a
-batch with an array of Response objects, and a notification with an empty
-string (per the spec, a server never answers a notification).
+``ProcessRequest`` answers a single request with a single Response object, a batch with an array of Response objects, and a notification with an empty string (per the spec, a server never answers a notification).
 
-### 3. Method naming
+### 3. Call it from a client
 
-By default a method is addressed as `path` + separator + `method`, where the
-separator is `/` (or whatever a class declares with the `separator=` tag):
+`TJRPCClient` is the mirror image: it links no transport either, so you hand it the one function that gets a payload to the peer and the answer back.
+
+```delphi
+uses
+  JRPC.Core,
+  JRPC.Client;
+
+var
+  LClient: TJRPCClient;
+begin
+  LClient := TJRPCClient.Create(nil);
+  try
+    LClient.OnTransport :=
+      function(const ARequest: string): string
+      begin
+        Result := MySocket.SendAndReadLine(ARequest);   // or LServer.ProcessRequest, to loop back
+      end;
+
+    // The id is generated, sent, and checked against the one echoed back.
+    WriteLn(LClient.ExecuteAs<Integer>(
+      TJRPCRequestBuilder.New
+        .SetMethod('math/sum')
+        .AddNamedParam('a', 10)
+        .AddNamedParam('b', 20)));
+  finally
+    LClient.Free;
+  end;
+end;
+```
+
+A failure the peer reports arrives as `EJRPCRemoteError`, carrying its `Code`, `Message` and structured `ErrorData`; a failure of the call itself (no transport, unreadable answer, an id that does not match) arrives as `EJRPCClientError`. Assign `OnError` to log every failure in one place; it reports and the exception carries on as usual.
+
+`ExecuteAsJSONValue` returns the raw `TJSONValue` instead and `ExecuteAsJsonString` its text, while `Execute` covers a call made for its effect and a notification, `ExecuteBatch` a batch, and `ExecuteRaw` a payload put on the wire untouched.
+
+`TJRPCRequestBuilder` is interfaced, so the request is freed with it and no call site needs a `try/finally`. `Build` only *lends* the request out — the builder keeps ownership — so anything that adopts a request, `TJRPCMessages` in a batch above all, gets a plain `TJRPCRequest.Create` instead.
+
+Because the transport is just a function, a client can be pointed straight at a `TJRPCServer` in the same process — which is how the suite tests it, with no socket involved.
+
+### 4. Method naming
+
+By default a method is addressed as `path` + separator + `method`, where the separator is `/` (or whatever a class declares with the `separator=` tag):
 
 ```delphi
   [JRPCPath('math')]        // math/sum
   [JRPCPath('custom', 'separator=.')]  // custom.hello
 ```
 
-A class that contributes **no path** - no attribute at all, or an explicitly
-empty `[JRPCPath('')]` - is *flat*: its methods declare the full JSON-RPC method
-name themselves, which is handy for protocols whose names are fixed
-(`tools/list`, `resources/read`, ...). Classes are registered explicitly, never
-discovered, so the attribute is only needed when it has something to say:
+A class that contributes **no path** - no attribute at all, or an explicitly empty `[JRPCPath('')]` - is *flat*: its methods declare the full JSON-RPC method name themselves, which is handy for protocols whose names are fixed (`tools/list`, `resources/read`, ...). Classes are registered explicitly, never discovered, so the attribute is only needed when it has something to say:
 
 ```delphi
 type
@@ -112,11 +147,7 @@ type
   end;
 ```
 
-Flat and path-based classes coexist in the same registry: a fully qualified
-flat name is resolved first, and everything else falls back to the usual
-path lookup. In a flat class every exposed method needs its `[JRPCMethod]`
-attribute - there is no implicit fallback to the Delphi method name, and two
-classes claiming the same flat name are rejected at registration time.
+Flat and path-based classes coexist in the same registry: a fully qualified flat name is resolved first, and everything else falls back to the usual path lookup. In a flat class every exposed method needs its `[JRPCMethod]` attribute - there is no implicit fallback to the Delphi method name, and two classes claiming the same flat name are rejected at registration time.
 
 ## 🧩 Context Injection & Memory Management
 
@@ -146,24 +177,14 @@ end;
 
 ## 🎯 Demo
 
-Demo/JRPCDemo is a console test runner that exercises the library end to end:
-named/positional parameters, notifications, batches (including batches with
-invalid elements), all standard error codes, object results with default and
-per-class Neon casing, whole-params objects (`[JRPCParams]`), enum parameters,
-null-id round trips, context injection, garbage collection and custom
-separators. It exits with a non-zero code when any assertion fails, and it
-registers a Logify console adapter at startup so the [PERF] timing lines are
-printed between every request/response pair.
+Demo/JRPCDemo is a console test runner that exercises 
+the library end to end: named/positional parameters, notifications, batches (including batches with invalid elements), all standard error codes, object results with default and per-class Neon casing, whole-params objects (`[JRPCParams]`), enum parameters, null-id round trips, context injection, garbage collection and custom separators. It exits with a non-zero code when any assertion fails, and it registers a Logify console adapter at startup so the [PERF] timing lines are printed between every request/response pair.
 
 ```
 BuildDemo.bat
 ```
 
-Demo/JRPCExample showcases a realistic example API - a notes CRUD service
-over an in-memory store (object params/results, array results, enums), plus
-custom separators, per-class Neon casing and context injection - as a guided
-showcase followed by an interactive prompt where any request can be typed and
-answered:
+Demo/JRPCExample showcases a realistic example API - a notes CRUD service over an in-memory store (object params/results, array results, enums), plus custom separators, per-class Neon casing and context injection - as a guided showcase followed by an interactive prompt where any request can be typed and answered:
 
 ```
 BuildExample.bat

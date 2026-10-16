@@ -77,6 +77,17 @@ resourcestring
   SJRPCParamsRequired = 'The method expects parameter "%s" but the request carries no params';
   SJRPCUnknownParamsType = 'Unknown params type';
 
+  // JRPC.Client
+  SJRPCClientNoTransport = 'No transport: assign Transport or OnTransport before calling the peer';
+  SJRPCClientEmptyReply = 'The peer answered nothing to a request that expects an answer';
+  SJRPCClientIdMismatch = 'Reply id [%s] does not match request id [%s]: the connection is out of sync';
+  SJRPCClientUnexpectedReply = 'The peer answered with a %s where a Response or an Error was expected';
+  SJRPCClientNotSingleReply = 'The peer answered with %d messages where exactly one was expected';
+  SJRPCClientUnknownReplyId = 'The batch answer carries id [%s], which was never sent';
+  SJRPCClientEmptyBatch = 'An empty batch has nothing to send';
+  SJRPCClientMixedParams = 'A message carries either named or positional params, never both';
+  SJRPCClientUnknownResultType = 'Cannot deserialize the result: the requested type has no RTTI';
+
 type
   /// <summary>
   ///   Base class for all JSON-RPC related exceptions

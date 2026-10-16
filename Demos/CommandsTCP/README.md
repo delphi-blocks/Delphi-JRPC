@@ -75,7 +75,8 @@ client                                   server
 - The client owns the `id` and uses monotonic integers from 1. The server echoes it.
 - Because calls are synchronous and answered in order, a client may simply write a line and
   read the next one. Checking the echoed `id` is still recommended — it catches a desync
-  immediately instead of silently pairing the wrong answer to the wrong call.
+  immediately instead of silently pairing the wrong answer to the wrong call. `TJRPCClient`
+  does both: it generates the id and verifies the one that comes back.
 - **A notification (a message with no `id`) gets no answer line at all.** If the client ever
   sends one, it must not block waiting for a response. The demo client sends requests only.
 - Batches work (a JSON array in, a JSON array of responses out) because the library handles
@@ -83,12 +84,15 @@ client                                   server
 
 Three things the wire actually shows, worth knowing before you write a client:
 
-- **A batch answer must be compacted before it is sent.** `TJRPCMessages.ToJson` serializes a
-  single response compactly, but a batch goes through `TNeon.Print(..., True)` and comes back
-  *pretty-printed* — which would break the one-message-per-line rule. `Server.Form.Main`
-  re-compacts any response containing a line break (`CompactJson`).
-- **A request with no parameters carries `"params":null`.** That is what `TJRPCRequest.ToJson`
-  emits, and this server accepts it, as it accepts `params` being absent entirely.
+- **Nothing may carry a line break.** `TJRPCMessages.ToJson` follows the Neon configuration's
+  pretty-print flag, which is off, so both a single message and a batch come out compact
+  today. A payload built with a pretty-printing configuration would break the
+  one-message-per-line rule, so both sides guard against it anyway: `Server.Form.Main`
+  re-compacts any response containing a line break (`CompactJson`), and `TJRPCClient` does
+  the same on the way out (`CompactPayload`, on by default).
+- **A request with no parameters omits the `params` member.** `ShouldInclude` keeps it out of
+  the JSON rather than emitting `"params":null`, which is neither an Array nor an Object and
+  which a strict peer may answer `-32602`. This server accepts the member either way.
 - **Non-ASCII travels as `\uXXXX` escapes** (`"àccenti"` goes out as `"àccenti"`), so the
   payload is pure ASCII on the wire and decodes back to the original text.
 
@@ -265,31 +269,90 @@ before adding a command that touches anything outside its own arguments.
 
 ### The client call
 
-```pascal
-var
-  LRequest: TJRPCRequest;
-  LResponse: string;
-begin
-  LRequest := TJRPCRequest.Create;
-  try
-    Inc(FLastId);
-    LRequest.Id := FLastId;                     // Integer, string and Int64 ids all work
-    LRequest.Method := 'echo';
-    LRequest.AddNamedParam('text', 'hello JRPC');
+`TJRPCClient` is the mirror image of `TJRPCServer`: where the server turns a string into a
+string, the client turns a method call into a string and the answer back into a value. It
+links no transport of its own, so the form says once how a line reaches the socket:
 
-    tcpClient.IOHandler.WriteLn(LRequest.ToJson, IndyTextEncoding_UTF8);
-    LResponse := tcpClient.IOHandler.ReadLn(IndyTextEncoding_UTF8);
-  finally
-    LRequest.Free;
+```pascal
+FJRPCClient := TJRPCClient.Create(Self);
+
+FJRPCClient.OnTransport :=
+  function(const ARequest: string): string
+  begin
+    tcpClient.IOHandler.WriteLn(ARequest, IndyTextEncoding_UTF8);
+    Result := tcpClient.IOHandler.ReadLn(IndyTextEncoding_UTF8);
+  end;
+
+// A notification gets no answer line at all, so it must not read one.
+FJRPCClient.OnNotify :=
+  procedure(const ARequest: string)
+  begin
+    tcpClient.IOHandler.WriteLn(ARequest, IndyTextEncoding_UTF8);
   end;
 ```
 
-`AddNamedParam` / `AddPositionParam` build the `params` member for you. Assigning
-`Request.Params` directly works too, but it **takes ownership** of the `TJSONValue` you
-hand it (the request frees it), so never free that object yourself.
+The form also points `OnError` at its logger once, so no button handler needs a
+`try/except` of its own:
 
-Parse the answer with `TJRPCResponse.CreateFromJson` (or `TJRPCMessages.CreateFromJson`
-when batches are in play) and check for an `error` member before reading `result`.
+```pascal
+FJRPCClient.OnError :=
+  procedure(E: Exception)
+  begin
+    LogError(E);
+  end;
+```
+
+`OnError` only *reports*: the exception carries on out of the call exactly as if nothing
+were assigned, so the flow of a failed call does not change - centralize the logging there
+and keep whatever handling the call site needs.
+
+After that a call is one expression, and the result comes back as a Delphi type:
+
+```pascal
+LText := FJRPCClient.ExecuteAs<string>(
+  TJRPCRequestBuilder.New
+    .SetMethod('echo')
+    .AddNamedParam('text', 'hello JRPC'));
+
+LEntries := FJRPCClient.ExecuteAs<TArray<TDirEntry>>(   // the entries are yours to free
+  TJRPCRequestBuilder.New
+    .SetMethod('dir/list')
+    .AddNamedParam('path', APath)
+    .AddNamedParam('mask', AMask));
+```
+
+`ExecuteAsJSONValue` hands back the raw `TJSONValue` instead and `ExecuteAsJsonString` its
+text, while `Execute` covers a call made for its effect and a notification, `ExecuteBatch`
+a batch, and `ExecuteRaw` a payload put on the wire untouched - which is how the demo's
+**send raw** box still provokes `-32700` by hand.
+
+Three things the client does that hand-written code usually skips:
+
+- **The id is generated and verified.** `TJRPCClient.NewId` hands out interlocked integers,
+  and the id echoed by the server is compared with the one that went out - kind included,
+  so the string `"7"` never passes for the number `7`. A desynchronised stream is reported
+  instead of quietly returning the previous call's answer.
+- **An `error` member becomes an exception.** `EJRPCRemoteError` carries the server's own
+  `Code`, `Message` and, in `ErrorData`, the `data` member - *lifted from the raw JSON*,
+  because `TJRPCErrorDetails.Data` is a `TValue` that only survives numbers, strings and
+  booleans. A failure of the client itself (no transport, unreadable answer, id mismatch)
+  raises `EJRPCClientError` instead, so "the server said no" stays distinct from "the call
+  never completed".
+- **The reply is classified before it is read.** Note that `TJRPCResponse.CreateFromJson`
+  **raises** when there is no `result` member - which is exactly what an error reply is - so
+  a reply must go through `TJRPCMessages.CreateFromJson` first. The client does this for
+  you; code that parses answers by hand has to remember it.
+
+`TJRPCRequestBuilder` is interfaced, so the request it is building is freed with it and no
+call site needs a `try/finally`. But `Build` only **lends** the request out - the builder
+keeps ownership - so anything that *adopts* a request takes a plain `TJRPCRequest.Create`
+instead. `ExecuteBatch` is the case that matters: `TJRPCMessages` owns what it is given,
+and a built request handed to it would be freed twice.
+
+Building by hand is otherwise unchanged: `AddNamedParam` / `AddPositionParam` build the
+`params` member (never both in one message - JSON-RPC 2.0 has no shape for that), while
+assigning `Request.Params` directly **takes ownership** of the `TJSONValue` you hand it,
+so never free that object yourself.
 
 ## 6. Adding a command
 

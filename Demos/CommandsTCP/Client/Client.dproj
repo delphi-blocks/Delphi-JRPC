@@ -194,7 +194,7 @@
                 </Excluded_Packages>
             </Delphi.Personality>
             <Deployment Version="5">
-                <DeployFile LocalName="Win32\Debug\Client.exe" Configuration="Debug" Class="ProjectOutput">
+                <DeployFile LocalName="..\Bin\Client.exe" Configuration="Debug" Class="ProjectOutput">
                     <Platform Name="Win32">
                         <RemoteName>Client.exe</RemoteName>
                         <Overwrite>true</Overwrite>
