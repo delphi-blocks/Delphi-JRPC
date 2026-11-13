@@ -19,6 +19,7 @@ A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI 
 - **Transport Agnostic**: integrate into any transport layer (HTTP, WebSockets, named pipes, STDIO) — on both sides: `TJRPCServer` takes a string and returns one, `TJRPCClient` is handed a function that does the same, or a streaming transport when the answer arrives as several messages.
 - **Typed Client**: call a remote method and get a Delphi value back — `ExecuteAs<T>` deserializes `result` through Neon, and an `error` member arrives as an exception.
 - **Streaming Answers**: a transport can deliver notifications before the response (`OnNotification`) and long-lived streams of frames (`ExecuteStream`), without the library linking any transport itself.
+- **Bidirectional Connection**: `TJRPCConnection` keeps calls in flight by id over one stream, with timeouts, cancellation, notifications and peer requests (`OnRequest`/`Respond`).
 - **Batch Processing**: multiple requests in a single batch.
 - **Notification Support**: full JSON-RPC notification pattern.
 
@@ -31,6 +32,7 @@ A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI 
 | **JRPC.Classes** | Supporting utilities: garbage collection, context management, route matching. |
 | **JRPC.Server** | Transport-agnostic server component (`TJRPCServer`) that parses, dispatches and answers requests, including batches. |
 | **JRPC.Client** | Transport-agnostic client component (`TJRPCClient`): builds requests, correlates answers by id, deserializes `result` into a Delphi type and raises the peer's `error`. |
+| **JRPC.Connection** | Bidirectional endpoint (`TJRPCConnection`) over a blocking message transport: pending calls by id, `CallAsync`/cancel, timeouts, notifications and peer requests. |
 
 ## 🛠️ Quick Start
 
@@ -158,6 +160,61 @@ end;
 `IJRPCStream.Close` is idempotent and unblocks the read when the transport implements `IJRPCAbortableTransport`; `Wait` blocks until the read loop ends and `Completed` says whether it has. The client must outlive its streams: they deliver through its `OnAfterReceive`/`OnError`.
 
 `NeonConfig` lets a client deserialize results with a configuration other than the default camel-cased one — the types of a protocol that spells its members differently, or one with custom serializers.
+
+#### Connections
+
+When one stream carries several calls, replies, notifications and peer requests, use `TJRPCConnection` instead of the client. The transport is a blocking `Receive` plus a `Send`; the connection owns the reader thread and matches replies to pending calls by id.
+
+```delphi
+uses
+  JRPC.Connection;
+
+LConnection := TJRPCConnection.Create(LTransport);   // IJRPCMessageTransport
+try
+  LConnection.OnNotification :=
+    procedure(const ANotification: TJRPCNotification)
+    begin
+      // Runs on the reader thread; do not Call synchronously from here.
+    end;
+
+  LConnection.OnRequest :=
+    procedure(const ARequest: TJRPCRequest)
+    var
+      LResponse: TJRPCResponse;
+    begin
+      LResponse := TJRPCResponse.Create;
+      try
+        LResponse.Id := ARequest.Id;
+        LResponse.Result := TJSONString.Create('pong');
+        LConnection.Respond(LResponse);
+      finally
+        LResponse.Free;
+      end;
+    end;
+
+  LConnection.Open;
+
+  // Blocking, with a timeout (0 waits forever); raises EJRPCRemoteError when
+  // the peer answers with an error.
+  LResponse := LConnection.Call(LRequest, 5000);
+  try
+    Use(LResponse.Result);
+  finally
+    LResponse.Free;
+  end;
+
+  // Or without blocking:
+  LCall := LConnection.CallAsync(LRequest);
+  if not LCall.Wait(5000) then
+    LCall.Cancel;
+finally
+  LConnection.Free;                                  // closes and joins the reader
+end;
+```
+
+`CallAsync` returns an `IJRPCCall`: `Wait`, `Completed`, `Cancel`, and `TakeResponse`/`TakeError`, which transfer ownership of the reply exactly once. `Close` fails every pending call with `EJRPCClientError`, closes the transport and joins the reader; `OnClose` fires once, whether the connection was closed locally or by the peer. Peer requests are answered with `Respond`, and notifications with `Notify`.
+
+A JSON-RPC batch is not fanned out by the connection: one message per frame, and a batch answer is reported to `OnError`.
 
 ### 4. Method naming
 

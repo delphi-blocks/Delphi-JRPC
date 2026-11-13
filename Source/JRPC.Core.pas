@@ -91,6 +91,20 @@ resourcestring
   SJRPCClientStreamEnded = 'The message stream ended before the response arrived';
   SJRPCClientStreamUnexpectedRequest = 'The peer sent a request on a stream this client cannot answer';
 
+  // JRPC.Connection
+  SJRPCConnectionNoTransport = 'No transport: assign one before opening the connection';
+  SJRPCConnectionAlreadyOpen = 'The connection is already open';
+  SJRPCConnectionNotOpen = 'The connection is not open';
+  SJRPCConnectionClosed = 'The connection is closed';
+  SJRPCConnectionClosedByPeer = 'The peer closed the connection';
+  SJRPCConnectionTimeout = 'The peer did not answer within %d ms';
+  SJRPCConnectionCallCancelled = 'The call was cancelled';
+  SJRPCConnectionNoResponse = 'The call completed without a response';
+  SJRPCConnectionNotSingle = 'The peer sent %d messages where exactly one was expected';
+  SJRPCConnectionUnknownId = 'The peer answered id [%s], which is not pending';
+  SJRPCConnectionNullId = 'The peer sent an error with a null id: %s';
+  SJRPCConnectionUnexpected = 'The peer sent a %s where a response, an error, a notification or a request was expected';
+
 type
   /// <summary>
   ///   Base class for all JSON-RPC related exceptions
@@ -135,6 +149,21 @@ type
     /// </remarks>
     property Data: string read FData write FData;
   end;
+
+  /// <summary>
+  ///   A failure of the client or connection itself: no transport, an
+  ///   unreadable answer, an answer that does not belong to the request that
+  ///   was sent, a timeout, a call that was cancelled or a connection that
+  ///   closed while a call was pending.
+  /// </summary>
+  /// <remarks>
+  ///   Deliberately distinct from EJRPCRemoteError: this one says "the call
+  ///   never completed", the other says "the call completed and the peer said
+  ///   no". Retrying makes sense for the first and rarely for the second. It
+  ///   carries the inherited -32603, so a client used as a gateway can turn it
+  ///   into a well formed error response without inventing a code.
+  /// </remarks>
+  EJRPCClientError = class(EJRPCException);
 
   /// <summary>
   ///   Exception raised when invalid JSON was received by the server.
@@ -263,6 +292,18 @@ type
     /// </remarks>
     class operator Equal(const ALeft, ARight: TJRPCID): Boolean;
     class operator NotEqual(const ALeft, ARight: TJRPCID): Boolean;
+
+    /// <summary>
+    ///   A fresh request id, unique across every client and connection in the
+    ///   process.
+    /// </summary>
+    /// <remarks>
+    ///   Integer ids from a single interlocked counter: thread-safe without a
+    ///   lock, and monotonic, which makes a log readable. One counter for the
+    ///   whole process on purpose - two endpoints over the same pipe would
+    ///   otherwise hand the peer the same id twice.
+    /// </remarks>
+    class function NewId: TJRPCID; static;
 
     /// <summary>
     ///   True when the id is absent (a Notification, or the null id of an error
@@ -947,6 +988,12 @@ implementation
 uses
   Logify;
 
+var
+  /// <summary>
+  ///   The process-wide request id counter behind TJRPCID.NewId.
+  /// </summary>
+  JRPCIdSeed: Integer;
+
 function JRPCNeonConfig: INeonConfiguration;
 begin
   Result := TNeonConfiguration.Camel
@@ -1231,6 +1278,11 @@ end;
 class operator TJRPCID.NotEqual(const ALeft, ARight: TJRPCID): Boolean;
 begin
   Result := not (ALeft = ARight);
+end;
+
+class function TJRPCID.NewId: TJRPCID;
+begin
+  Result := TInterlocked.Increment(JRPCIdSeed);
 end;
 
 { EJRPCRemoteError }

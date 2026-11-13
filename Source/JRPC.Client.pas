@@ -22,17 +22,14 @@ uses
 
 type
   /// <summary>
-  ///   A failure of the client itself: no transport, an unreadable answer, an
-  ///   answer that does not belong to the request that was sent.
+  ///   A failure of the call itself: the call never completed.
   /// </summary>
   /// <remarks>
-  ///   Deliberately distinct from EJRPCRemoteError: this one says "the call
-  ///   never completed", the other says "the call completed and the peer said
-  ///   no". Retrying makes sense for the first and rarely for the second. It
-  ///   carries the inherited -32603, so a client used as a gateway can turn it
-  ///   into a well formed error response without inventing a code.
+  ///   Declared in JRPC.Core, next to EJRPCRemoteError, so the client and a
+  ///   connection raise the same exception. This alias keeps the name where a
+  ///   client's users have always found it.
   /// </remarks>
-  EJRPCClientError = class(EJRPCException);
+  EJRPCClientError = JRPC.Core.EJRPCClientError;
 
   /// <summary>
   ///   The "error" member the peer sent back, raised as a Delphi exception.
@@ -329,8 +326,6 @@ type
   /// </remarks>
   TJRPCClient = class(TComponent)
   private
-    class var FIdSeed: Integer;
-  private
     FNeonConfig: INeonConfiguration;
     FCompactPayload: Boolean;
     FOnBeforeSend: TJRPCTraceProc;
@@ -603,7 +598,9 @@ end;
 
 class function TJRPCClient.NewId: TJRPCID;
 begin
-  Result := TInterlocked.Increment(FIdSeed);
+  // The counter lives in JRPC.Core, so a connection and a client over the same
+  // peer never hand out the same id twice.
+  Result := TJRPCID.NewId;
 end;
 
 class function TJRPCClient.MessageId(AMessage: TJRPCMessage; out AId: TJRPCID): Boolean;

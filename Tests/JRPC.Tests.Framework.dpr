@@ -28,6 +28,7 @@ uses
 
   JRPC.Tests.Api in 'Source\JRPC.Tests.Api.pas',
   JRPC.Tests.Client in 'Source\JRPC.Tests.Client.pas',
+  JRPC.Tests.Connection in 'Source\JRPC.Tests.Connection.pas',
   JRPC.Tests.Core in 'Source\JRPC.Tests.Core.pas',
   JRPC.Tests.Invoker in 'Source\JRPC.Tests.Invoker.pas',
   JRPC.Tests.Server in 'Source\JRPC.Tests.Server.pas';
