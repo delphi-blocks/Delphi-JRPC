@@ -1,4 +1,4 @@
-﻿{******************************************************************************}
+{******************************************************************************}
 {                                                                              }
 {  Delphi-JRPC - JSON-RPC 2.0 Library for Delphi                               }
 {                                                                              }
@@ -36,45 +36,13 @@ type
 
   /// <summary>
   ///   The "error" member the peer sent back, raised as a Delphi exception.
-  ///   Code and Message are the server's own; ErrorData is the untouched
-  ///   "data" member, when the server sent one.
   /// </summary>
   /// <remarks>
-  ///   Two things are worth knowing about how this is filled in.
-  ///
-  ///   The inherited Code is read-only and EJRPCException.AfterConstruction
-  ///   stamps -32603 over any code left at 0 - which would silently rewrite a
-  ///   peer that legitimately answered 0. The remote code is therefore kept
-  ///   aside and re-applied in this class's AfterConstruction, which runs
-  ///   *after* the inherited one: whatever came off the wire is what Code
-  ///   reports.
-  ///
-  ///   ErrorData is read from the raw JSON, not from TJRPCErrorDetails.Data:
-  ///   that property is a TValue fed by TJValueSerializer, which maps only
-  ///   numbers, strings and booleans and hands back an empty TValue for an
-  ///   object or an array - so every structured payload (MCP defines several)
-  ///   would be lost on the way in.
+  ///   Declared in JRPC.Core, next to TJRPCError, so that the client and a
+  ///   connection both raise the same exception. This alias keeps the name
+  ///   where a client's users have always found it.
   /// </remarks>
-  EJRPCRemoteError = class(EJRPCException)
-  private
-    FRemoteCode: Integer;
-    FErrorData: TJSONValue;
-  public
-    /// <summary>
-    ///   Takes ownership of AErrorData, which may be nil.
-    /// </summary>
-    constructor Create(ACode: Integer; const AMessage: string;
-      AErrorData: TJSONValue); reintroduce;
-    destructor Destroy; override;
-
-    procedure AfterConstruction; override;
-
-    /// <summary>
-    ///   The "data" member of the error object, owned by the exception, or nil
-    ///   when the peer sent none. Clone it if it must outlive the handler.
-    /// </summary>
-    property ErrorData: TJSONValue read FErrorData;
-  end;
+  EJRPCRemoteError = JRPC.Core.EJRPCRemoteError;
 
   /// <summary>
   ///   Builds a Request in one expression:
@@ -217,6 +185,100 @@ type
   end;
 
   /// <summary>
+  ///   Receives one JSON-RPC message of a streamed answer, as text.
+  /// </summary>
+  /// <remarks>
+  ///   Return True to keep reading, False once the message that was wanted has
+  ///   arrived. A transport blocked on a read cannot act on that False until
+  ///   the next message arrives: give it IJRPCAbortableTransport as well if the
+  ///   read has to be interruptible from another thread.
+  ///
+  ///   An exception raised by the callback is not the transport's to swallow:
+  ///   let it propagate, so the caller of the client sees it.
+  /// </remarks>
+  TJRPCFrameProc = reference to function(const AJSON: string): Boolean;
+
+  /// <summary>
+  ///   A transport whose answer may arrive as several messages: an SSE body, a
+  ///   pipe, a WebSocket.
+  /// </summary>
+  /// <remarks>
+  ///   Optional: TJRPCClient falls back to SendAndReceive for a transport that
+  ///   implements only IJRPCClientTransport. The frames are JSON-RPC messages,
+  ///   not wire events - the transport owns the framing (SSE "data:", a line
+  ///   ending, a WebSocket message) and hands over one JSON document at a
+  ///   time, in the order it arrived.
+  /// </remarks>
+  IJRPCStreamingTransport = interface(IJRPCClientTransport)
+  ['{A1B2C3D4-5E6F-4A70-8B9C-0D1E2F3A4B5C}']
+    /// <summary>
+    ///   Writes ARequest and hands every message of the answer to AOnFrame
+    ///   until the callback returns False or the stream closes.
+    /// </summary>
+    procedure SendAndReceiveFrames(const ARequest: string; const AOnFrame: TJRPCFrameProc);
+  end;
+
+  /// <summary>
+  ///   A streaming transport whose pending read can be interrupted.
+  /// </summary>
+  /// <remarks>
+  ///   IJRPCStream.Close calls Abort when the transport implements this, which
+  ///   is what makes closing a long-lived stream prompt rather than a matter of
+  ///   waiting for the peer to send something else.
+  /// </remarks>
+  IJRPCAbortableTransport = interface
+  ['{B2C3D4E5-6F70-4B81-9CAD-1E2F3A4B5C6D}']
+    /// <summary>
+    ///   Unblocks a pending read. Idempotent, and safe to call from another
+    ///   thread than the one reading.
+    /// </summary>
+    procedure Abort;
+  end;
+
+  /// <summary>
+  ///   A stream opened with TJRPCClient.ExecuteStream.
+  /// </summary>
+  /// <remarks>
+  ///   The frames are delivered on a thread of the client's own, in the order
+  ///   they arrive, until the stream closes or Close is called. The object
+  ///   stays alive while the stream is being read even if the caller drops the
+  ///   interface.
+  /// </remarks>
+  IJRPCStream = interface
+  ['{C3D4E5F6-7081-4C92-8DBE-2F3A4B5C6D7E}']
+    /// <summary>
+    ///   Stops delivering frames and asks the transport to abort the read.
+    ///   Idempotent; a transport that is not IJRPCAbortableTransport keeps
+    ///   reading until the peer closes the stream.
+    /// </summary>
+    procedure Close;
+
+    /// <summary>
+    ///   True once the read loop has ended, however it ended.
+    /// </summary>
+    function Completed: Boolean;
+
+    /// <summary>
+    ///   Waits for the read loop to end. False on timeout.
+    /// </summary>
+    function Wait(ATimeout: Cardinal): Boolean; overload;
+
+    /// <summary>
+    ///   Waits for the read loop to end, with no timeout.
+    /// </summary>
+    function Wait: Boolean; overload;
+  end;
+
+  /// <summary>
+  ///   Called with a notification that arrived while an answer was streaming.
+  /// </summary>
+  /// <remarks>
+  ///   The object belongs to the client and is freed when the call returns:
+  ///   Clone it to keep it past the handler.
+  /// </remarks>
+  TJRPCNotificationProc = reference to procedure(const ANotification: TJRPCNotification);
+
+  /// <summary>
   ///   The ad-hoc form of IJRPCClientTransport.SendAndReceive.
   /// </summary>
   /// <remarks>
@@ -274,6 +336,7 @@ type
     FOnBeforeSend: TJRPCTraceProc;
     FOnAfterReceive: TJRPCTraceProc;
     FOnError: TJRPCErrorProc;
+    FOnNotification: TJRPCNotificationProc;
 
     /// <summary>
     ///   Hands E to OnError, if anyone is listening. The caller re-raises
@@ -288,13 +351,24 @@ type
     /// </summary>
     function DoExecute(ARequest: TJRPCRequest): TJSONValue;
 
+    /// <summary>
+    ///   Serializes AJSON for the wire: compacted when needed, then handed to
+    ///   OnBeforeSend.
+    /// </summary>
+    function PreparePayload(const AJSON: string): string;
+
     function Transmit(const AJSON: string; AExpectAnswer: Boolean): string;
     function ReadReply(const AReply: string; const AExpectedId: TJRPCID): TJSONValue;
+
+    /// <summary>
+    ///   Reads the answer of ARequest from a stream, routing the notifications
+    ///   that arrive before the response to OnNotification.
+    /// </summary>
+    function ReadStreamingReply(ARequest: TJRPCRequest; const ATransport: IJRPCStreamingTransport): TJSONValue;
+
     function ReadBatchReply(const AReply: string; ASent: TJRPCMessages): TJRPCMessages;
-    function BuildRemoteError(AError: TJRPCError; ARawMessage: TJSONObject): EJRPCRemoteError;
     procedure CheckReplyId(const AActual, AExpected: TJRPCID);
 
-    class function SameId(const ALeft, ARight: TJRPCID): Boolean; static;
     class function Compact(const AJSON: string): string; static;
     class function MessageId(AMessage: TJRPCMessage; out AId: TJRPCID): Boolean; static;
   protected
@@ -395,6 +469,32 @@ type
     function ExecuteRaw(const AJSON: string): string;
 
     /// <summary>
+    ///   Sends ARequest and pumps every message of its answer through AOnFrame,
+    ///   on a thread of the client's own, until the stream closes or Close is
+    ///   called.
+    /// </summary>
+    /// <remarks>
+    ///   The long-lived case: the answer is not a single response, and may
+    ///   never carry one (a subscription that only ever sends notifications).
+    ///   The frames are raw JSON, in arrival order, so the caller decides what
+    ///   each one means. This is also the only entry point that can read a
+    ///   stream after the request was answered.
+    ///
+    ///   Requires a transport that implements IJRPCStreamingTransport. The
+    ///   request is given an id when it carries none, and that id is what the
+    ///   peer will use if it ever answers.
+    ///
+    ///   The client must outlive the stream: the stream delivers its frames
+    ///   through the client's OnAfterReceive/OnError and keeps a reference to
+    ///   it. Close and Wait before freeing the client.
+    ///
+    ///   One client drives one transport, so two concurrent streams need a
+    ///   transport that multiplexes them - or a client each.
+    /// </remarks>
+    function ExecuteStream(ARequest: TJRPCRequest; const AOnFrame: TJRPCFrameProc): IJRPCStream; overload;
+    function ExecuteStream(ARequest: IJRPCRequestBuilder; const AOnFrame: TJRPCFrameProc): IJRPCStream; overload;
+
+    /// <summary>
     ///   The message in AMessages carrying AId, or nil. The way to line up a
     ///   batch answer with what was sent.
     /// </summary>
@@ -406,6 +506,17 @@ type
     ///   blocking on a read.
     /// </summary>
     property Transport: IJRPCClientTransport read FTransport write FTransport;
+
+    /// <summary>
+    ///   The Neon configuration used to deserialize a "result" into a Delphi
+    ///   type. Camel-cased standard members by default.
+    /// </summary>
+    /// <remarks>
+    ///   Assign it when the types being deserialized were generated for
+    ///   another casing (MCP types, say, are fields written in camel case), or
+    ///   to register custom serializers. It must not be nil.
+    /// </remarks>
+    property NeonConfig: INeonConfiguration read FNeonConfig write FNeonConfig;
 
     /// <summary>
     ///   Ad-hoc transport: a function from request JSON to answer JSON. Used
@@ -428,7 +539,8 @@ type
 
     /// <summary>
     ///   Called with the answer as it arrived, before it is parsed - so it
-    ///   sees even the payloads that turn out to be unreadable.
+    ///   sees even the payloads that turn out to be unreadable. With a
+    ///   streaming transport it fires once per frame.
     /// </summary>
     property OnAfterReceive: TJRPCTraceProc read FOnAfterReceive write FOnAfterReceive;
 
@@ -446,6 +558,17 @@ type
     ///   the round trip rather than each other.
     /// </remarks>
     property OnError: TJRPCErrorProc read FOnError write FOnError;
+
+    /// <summary>
+    ///   Called with each notification that arrives while an answer streams,
+    ///   before the response that ends the call.
+    /// </summary>
+    /// <remarks>
+    ///   Only a streaming transport can deliver one there: a plain
+    ///   SendAndReceive answer carries a single message. The notification is
+    ///   freed when the call returns, so Clone it to keep it.
+    /// </remarks>
+    property OnNotification: TJRPCNotificationProc read FOnNotification write FOnNotification;
 
     /// <summary>
     ///   Collapses an outgoing payload onto a single line when it contains a
@@ -466,31 +589,6 @@ uses
   Neon.Core.Utils,
   Neon.Core.Persistence.JSON;
 
-{ EJRPCRemoteError }
-
-constructor EJRPCRemoteError.Create(ACode: Integer; const AMessage: string;
-  AErrorData: TJSONValue);
-begin
-  inherited Create(AMessage);
-  FRemoteCode := ACode;
-  FErrorData := AErrorData;
-end;
-
-destructor EJRPCRemoteError.Destroy;
-begin
-  FErrorData.Free;
-  inherited;
-end;
-
-procedure EJRPCRemoteError.AfterConstruction;
-begin
-  inherited;
-  // Runs after EJRPCException.AfterConstruction, which defaults a zero code to
-  // -32603. A peer may legitimately answer 0, so the wire value is restored
-  // here rather than being left to that default.
-  FCode := FRemoteCode;
-end;
-
 { TJRPCClient }
 
 constructor TJRPCClient.Create(AOwner: TComponent);
@@ -506,23 +604,6 @@ end;
 class function TJRPCClient.NewId: TJRPCID;
 begin
   Result := TInterlocked.Increment(FIdSeed);
-end;
-
-class function TJRPCClient.SameId(const ALeft, ARight: TJRPCID): Boolean;
-begin
-  if ALeft.IsNull or ARight.IsNull then
-    Exit(ALeft.IsNull and ARight.IsNull);
-
-  // Kind first, then value: AsString renders a numeric id as text, so it cannot
-  // tell the string "7" from the number 7 - and the spec wants the id echoed
-  // with the type it was sent with.
-  if ALeft.IsInteger and ARight.IsInteger then
-    Exit(ALeft.AsInteger = ARight.AsInteger);
-
-  if ALeft.IsString and ARight.IsString then
-    Exit(ALeft.AsString = ARight.AsString);
-
-  Result := False;
 end;
 
 class function TJRPCClient.MessageId(AMessage: TJRPCMessage; out AId: TJRPCID): Boolean;
@@ -546,7 +627,7 @@ var
   LId: TJRPCID;
 begin
   for LMessage in AMessages.List do
-    if MessageId(LMessage, LId) and SameId(LId, AId) then
+    if MessageId(LMessage, LId) and (LId = AId) then
       Exit(LMessage);
 
   Result := nil;
@@ -574,11 +655,21 @@ end;
 
 procedure TJRPCClient.CheckReplyId(const AActual, AExpected: TJRPCID);
 begin
-  if SameId(AActual, AExpected) then
+  if AActual = AExpected then
     Exit;
 
   raise EJRPCClientError.CreateFmt(SJRPCClientIdMismatch,
     [AActual.AsString, AExpected.AsString]);
+end;
+
+function TJRPCClient.PreparePayload(const AJSON: string): string;
+begin
+  Result := AJSON;
+  if FCompactPayload then
+    Result := Compact(Result);
+
+  if Assigned(FOnBeforeSend) then
+    FOnBeforeSend(Result);
 end;
 
 function TJRPCClient.Transmit(const AJSON: string; AExpectAnswer: Boolean): string;
@@ -587,12 +678,7 @@ var
 begin
   Result := '';
 
-  LPayload := AJSON;
-  if FCompactPayload then
-    LPayload := Compact(LPayload);
-
-  if Assigned(FOnBeforeSend) then
-    FOnBeforeSend(LPayload);
+  LPayload := PreparePayload(AJSON);
 
   // The transport is picked once, here, so that no call site has to remember
   // that a notification must not read anything back.
@@ -619,36 +705,6 @@ begin
 
   if AExpectAnswer and Assigned(FOnAfterReceive) then
     FOnAfterReceive(Result);
-end;
-
-function TJRPCClient.BuildRemoteError(AError: TJRPCError; ARawMessage: TJSONObject): EJRPCRemoteError;
-var
-  LCode: Integer;
-  LMessage: string;
-  LData: TJSONValue;
-  LErrorNode: TJSONValue;
-begin
-  LCode := JRPC_INTERNAL_ERROR;
-  if AError.Error.Code.HasValue then
-    LCode := AError.Error.Code.Value;
-
-  LMessage := SJRPCUnexpectedError;
-  if AError.Error.Message.HasValue then
-    LMessage := AError.Error.Message.Value;
-
-  // Straight from the raw document: TJRPCErrorDetails.Data is a TValue fed by
-  // TJValueSerializer, which returns an empty TValue for an object or an array
-  // - so a structured payload never survives the trip through the message.
-  LData := nil;
-  LErrorNode := ARawMessage.FindValue('error');
-  if LErrorNode is TJSONObject then
-  begin
-    LErrorNode := (LErrorNode as TJSONObject).FindValue('data');
-    if Assigned(LErrorNode) then
-      LData := LErrorNode.Clone as TJSONValue;
-  end;
-
-  Result := EJRPCRemoteError.Create(LCode, LMessage, LData);
 end;
 
 function TJRPCClient.ReadReply(const AReply: string; const AExpectedId: TJRPCID): TJSONValue;
@@ -692,7 +748,7 @@ begin
         if not (LMessage as TJRPCError).Id.IsNull then
           CheckReplyId((LMessage as TJRPCError).Id, AExpectedId);
 
-        LRemoteError := BuildRemoteError(LMessage as TJRPCError, LDocument as TJSONObject);
+        LRemoteError := EJRPCRemoteError.FromError(LMessage as TJRPCError, LDocument as TJSONObject);
       end
       else
         raise EJRPCClientError.CreateFmt(SJRPCClientUnexpectedReply, [LMessage.ClassName]);
@@ -754,13 +810,106 @@ begin
 end;
 
 function TJRPCClient.DoExecute(ARequest: TJRPCRequest): TJSONValue;
+var
+  LStreaming: IJRPCStreamingTransport;
 begin
   // A request the caller built by hand may carry no id: give it one, so the
   // answer can be correlated at all.
   if ARequest.Id.IsNull then
     ARequest.Id := NewId;
 
+  // A streaming transport answers with a sequence of messages, not one body:
+  // the notifications that precede the response would otherwise be lost.
+  if Supports(FTransport, IJRPCStreamingTransport, LStreaming) then
+    Exit(ReadStreamingReply(ARequest, LStreaming));
+
   Result := ReadReply(Transmit(ARequest.ToJson, True), ARequest.Id);
+end;
+
+function TJRPCClient.ReadStreamingReply(ARequest: TJRPCRequest; const ATransport: IJRPCStreamingTransport): TJSONValue;
+var
+  LResult: TJSONValue;
+  LRemoteError: EJRPCRemoteError;
+  LDone: Boolean;
+begin
+  LResult := nil;
+  LRemoteError := nil;
+  LDone := False;
+
+  ATransport.SendAndReceiveFrames(PreparePayload(ARequest.ToJson),
+    function(const AJSON: string): Boolean
+    var
+      LDocument: TJSONValue;
+      LMessages: TJRPCMessages;
+      LMessage: TJRPCMessage;
+    begin
+      // Once the response (or the error) has arrived there is nothing left to
+      // read: tell the transport to stop.
+      Result := not LDone;
+      if not Result then
+        Exit;
+
+      if Assigned(FOnAfterReceive) then
+        FOnAfterReceive(AJSON);
+
+      LDocument := TJSONObject.ParseJSONValue(AJSON);
+      if not Assigned(LDocument) then
+        raise EJRPCParseError.Create(SJRPCInvalidJSONReceived);
+
+      try
+        LMessages := TJRPCMessages.CreateFromJson(LDocument);
+        try
+          if LMessages.Count <> 1 then
+            raise EJRPCClientError.CreateFmt(SJRPCClientNotSingleReply,
+              [LMessages.Count]);
+
+          LMessage := LMessages.List[0];
+
+          if LMessage is TJRPCResponse then
+          begin
+            CheckReplyId((LMessage as TJRPCResponse).Id, ARequest.Id);
+            // Result is never nil - the constructor installs a TJSONNull - so a
+            // "result" of null comes back as a live value, not as nil.
+            LResult := (LMessage as TJRPCResponse).Result.Clone as TJSONValue;
+            LDone := True;
+          end
+          else if LMessage is TJRPCError then
+          begin
+            // A null id is accepted here, as it is in ReadReply: per the spec
+            // that is what a peer answers when it could not read the id.
+            if not (LMessage as TJRPCError).Id.IsNull then
+              CheckReplyId((LMessage as TJRPCError).Id, ARequest.Id);
+
+            LRemoteError := EJRPCRemoteError.FromError(LMessage as TJRPCError,
+              LDocument as TJSONObject);
+            LDone := True;
+          end
+          else if LMessage is TJRPCNotification then
+          begin
+            if Assigned(FOnNotification) then
+              FOnNotification(LMessage as TJRPCNotification);
+          end
+          else
+            // A request on the same stream is something only a bidirectional
+            // connection can answer; this client has no such channel.
+            raise EJRPCClientError.Create(SJRPCClientStreamUnexpectedRequest);
+        finally
+          LMessages.Free;
+        end;
+      finally
+        LDocument.Free;
+      end;
+    end);
+
+  // Raised only once the frames are done: the exception owns a clone, so
+  // nothing it carries dies with the parse tree.
+  if Assigned(LRemoteError) then
+    raise LRemoteError;
+
+  if not Assigned(LResult) then
+    raise EJRPCClientError.Create(SJRPCClientStreamEnded);
+
+  Result := LResult;
 end;
 
 function TJRPCClient.ExecuteAsJSONValue(ARequest: TJRPCRequest): TJSONValue;
@@ -928,6 +1077,169 @@ begin
       raise;
     end;
   end;
+end;
+
+type
+  TJRPCStream = class;
+
+  /// <summary>
+  ///   Runs one stream to completion off the caller's thread. It holds the
+  ///   interface reference that keeps the stream object alive until the read
+  ///   loop ends, whether the caller still holds one or not.
+  /// </summary>
+  TJRPCStreamThread = class(TThread)
+  private
+    FStream: TJRPCStream;
+    FKeepAlive: IJRPCStream;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AStream: TJRPCStream; const AKeepAlive: IJRPCStream);
+  end;
+
+  TJRPCStream = class(TInterfacedObject, IJRPCStream)
+  private
+    FClient: TJRPCClient;
+    FTransport: IJRPCStreamingTransport;
+    FAbort: IJRPCAbortableTransport;
+    FPayload: string;
+    FOnFrame: TJRPCFrameProc;
+    FClosed: Integer;
+    FDone: TEvent;
+  public
+    constructor Create(AClient: TJRPCClient;
+      const ATransport: IJRPCStreamingTransport; const APayload: string;
+      const AOnFrame: TJRPCFrameProc);
+    destructor Destroy; override;
+
+    /// <summary>
+    ///   The read loop itself, called by the thread.
+    /// </summary>
+    procedure Run;
+
+    procedure Close;
+    function Completed: Boolean;
+    function Wait(ATimeout: Cardinal): Boolean; overload;
+    function Wait: Boolean; overload;
+  end;
+
+function TJRPCClient.ExecuteStream(ARequest: TJRPCRequest; const AOnFrame: TJRPCFrameProc): IJRPCStream;
+var
+  LStreaming: IJRPCStreamingTransport;
+begin
+  if not Supports(FTransport, IJRPCStreamingTransport, LStreaming) then
+    raise EJRPCClientError.Create(SJRPCClientStreamUnsupported);
+
+  // The id stays with the request even though no response may ever come: it is
+  // what a peer that does answer (a listen closing gracefully, say) uses.
+  if ARequest.Id.IsNull then
+    ARequest.Id := NewId;
+
+  Result := TJRPCStream.Create(Self, LStreaming,
+    PreparePayload(ARequest.ToJson), AOnFrame);
+end;
+
+function TJRPCClient.ExecuteStream(ARequest: IJRPCRequestBuilder; const AOnFrame: TJRPCFrameProc): IJRPCStream;
+begin
+  Result := ExecuteStream(ARequest.Build, AOnFrame);
+end;
+
+{ TJRPCStreamThread }
+
+constructor TJRPCStreamThread.Create(AStream: TJRPCStream; const AKeepAlive: IJRPCStream);
+begin
+  inherited Create(True);
+  FreeOnTerminate := True;
+  FStream := AStream;
+  FKeepAlive := AKeepAlive;
+end;
+
+procedure TJRPCStreamThread.Execute;
+begin
+  try
+    FStream.Run;
+  finally
+    // The caller may have dropped its interface already: this is then the last
+    // reference, and releasing it frees the stream. Nothing below may touch
+    // FStream.
+    FKeepAlive := nil;
+  end;
+end;
+
+{ TJRPCStream }
+
+constructor TJRPCStream.Create(AClient: TJRPCClient;
+  const ATransport: IJRPCStreamingTransport; const APayload: string;
+  const AOnFrame: TJRPCFrameProc);
+var
+  LKeepAlive: IJRPCStream;
+begin
+  inherited Create;
+  FClient := AClient;
+  FTransport := ATransport;
+  FPayload := APayload;
+  FOnFrame := AOnFrame;
+  FClosed := 0;
+  FDone := TEvent.Create(nil, True, False, '');
+  FAbort := nil;
+  Supports(ATransport, IJRPCAbortableTransport, FAbort);
+
+  LKeepAlive := Self;
+  TJRPCStreamThread.Create(Self, LKeepAlive).Start;
+end;
+
+destructor TJRPCStream.Destroy;
+begin
+  FDone.Free;
+  inherited;
+end;
+
+procedure TJRPCStream.Run;
+begin
+  try
+    try
+      FTransport.SendAndReceiveFrames(FPayload,
+        function(const AJSON: string): Boolean
+        begin
+          Result := FClosed = 0;
+          if not Result then
+            Exit;
+
+          if Assigned(FClient.OnAfterReceive) then
+            FClient.OnAfterReceive(AJSON);
+
+          if Assigned(FOnFrame) then
+            Result := FOnFrame(AJSON);
+        end);
+    except
+      on E: Exception do
+        FClient.ReportError(E);
+    end;
+  finally
+    FDone.SetEvent;
+  end;
+end;
+
+procedure TJRPCStream.Close;
+begin
+  if TInterlocked.Exchange(FClosed, 1) = 0 then
+    if Assigned(FAbort) then
+      FAbort.Abort;
+end;
+
+function TJRPCStream.Completed: Boolean;
+begin
+  Result := FDone.WaitFor(0) = wrSignaled;
+end;
+
+function TJRPCStream.Wait(ATimeout: Cardinal): Boolean;
+begin
+  Result := FDone.WaitFor(ATimeout) = wrSignaled;
+end;
+
+function TJRPCStream.Wait: Boolean;
+begin
+  Result := Wait($FFFFFFFF);
 end;
 
 { TJRPCMethodBuilder }

@@ -16,8 +16,9 @@ A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI 
 - **Flexible Routing**: `TRouteMatcher` for URI-style template matching and parameter extraction.
 - **Flexible Naming**: `path` + separator + `method`, a custom separator, or *flat* classes (`[JRPCPath('')]`) whose methods declare the full name (`tools/call`).
 - **High Performance**: powered by [Neon](https://github.com/paolo-rossi/delphi-neon), with built-in **TStopwatch [PERF] instrumentation** in the invoker and the server.
-- **Transport Agnostic**: integrate into any transport layer (HTTP, WebSockets, named pipes, STDIO) — on both sides: `TJRPCServer` takes a string and returns one, `TJRPCClient` is handed a function that does the same.
+- **Transport Agnostic**: integrate into any transport layer (HTTP, WebSockets, named pipes, STDIO) — on both sides: `TJRPCServer` takes a string and returns one, `TJRPCClient` is handed a function that does the same, or a streaming transport when the answer arrives as several messages.
 - **Typed Client**: call a remote method and get a Delphi value back — `ExecuteAs<T>` deserializes `result` through Neon, and an `error` member arrives as an exception.
+- **Streaming Answers**: a transport can deliver notifications before the response (`OnNotification`) and long-lived streams of frames (`ExecuteStream`), without the library linking any transport itself.
 - **Batch Processing**: multiple requests in a single batch.
 - **Notification Support**: full JSON-RPC notification pattern.
 
@@ -120,6 +121,43 @@ A failure the peer reports arrives as `EJRPCRemoteError`, carrying its `Code`, `
 `TJRPCRequestBuilder` is interfaced, so the request is freed with it and no call site needs a `try/finally`. `Build` only *lends* the request out — the builder keeps ownership — so anything that adopts a request, `TJRPCMessages` in a batch above all, gets a plain `TJRPCRequest.Create` instead.
 
 Because the transport is just a function, a client can be pointed straight at a `TJRPCServer` in the same process — which is how the suite tests it, with no socket involved.
+
+#### Streaming answers
+
+A JSON-RPC answer is normally one message. Some transports (an SSE body, a WebSocket, a pipe) can carry several: a peer may send progress notifications before the response, and a subscription stream may never send a response at all.
+
+A transport that also implements `IJRPCStreamingTransport` is used in streaming mode automatically. Each frame is parsed; notifications go to `OnNotification`; the response resolves the call.
+
+```delphi
+LClient.OnNotification :=
+  procedure(const ANotification: TJRPCNotification)
+  begin
+    // progress, log, ... The object is valid only for the duration of the call.
+  end;
+
+// An ordinary call: the response still comes back, the notifications do not
+// get in the way.
+LValue := LClient.ExecuteAs<Integer>(LRequest);
+
+// A long-lived stream: frames are raw JSON, in arrival order, on a thread of
+// the client's own.
+LStream := LClient.ExecuteStream(
+  TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
+  function(const AJSON: string): Boolean
+  begin
+    HandleFrame(AJSON);
+    Result := True;                    // False stops the read
+  end);
+try
+  LStream.Wait(5000);
+finally
+  LStream.Close;                       // asks an IJRPCAbortableTransport to abort
+end;
+```
+
+`IJRPCStream.Close` is idempotent and unblocks the read when the transport implements `IJRPCAbortableTransport`; `Wait` blocks until the read loop ends and `Completed` says whether it has. The client must outlive its streams: they deliver through its `OnAfterReceive`/`OnError`.
+
+`NeonConfig` lets a client deserialize results with a configuration other than the default camel-cased one — the types of a protocol that spells its members differently, or one with custom serializers.
 
 ### 4. Method naming
 

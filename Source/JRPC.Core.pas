@@ -1,4 +1,4 @@
-﻿{******************************************************************************}
+{******************************************************************************}
 {                                                                              }
 {  Delphi-JRPC - JSON-RPC 2.0 Library for Delphi                               }
 {                                                                              }
@@ -87,6 +87,9 @@ resourcestring
   SJRPCClientEmptyBatch = 'An empty batch has nothing to send';
   SJRPCClientMixedParams = 'A message carries either named or positional params, never both';
   SJRPCClientUnknownResultType = 'Cannot deserialize the result: the requested type has no RTTI';
+  SJRPCClientStreamUnsupported = 'The assigned transport cannot stream: it does not implement IJRPCStreamingTransport';
+  SJRPCClientStreamEnded = 'The message stream ended before the response arrived';
+  SJRPCClientStreamUnexpectedRequest = 'The peer sent a request on a stream this client cannot answer';
 
 type
   /// <summary>
@@ -247,6 +250,19 @@ type
 
     class operator Implicit(const ASource: TJRPCID): Integer;
     class operator Implicit(const ASource: TJRPCID): string;
+
+    /// <summary>
+    ///   Two ids are equal when both are absent, or when both are the same
+    ///   kind (integer or string) and carry the same value.
+    /// </summary>
+    /// <remarks>
+    ///   Kind first, then value: AsString renders a numeric id as text, so it
+    ///   cannot tell the string "7" from the number 7 - and the specification
+    ///   wants an id echoed with the type it was sent with. Comparing across
+    ///   kinds is therefore inequality, not a match.
+    /// </remarks>
+    class operator Equal(const ALeft, ARight: TJRPCID): Boolean;
+    class operator NotEqual(const ALeft, ARight: TJRPCID): Boolean;
 
     /// <summary>
     ///   True when the id is absent (a Notification, or the null id of an error
@@ -610,6 +626,55 @@ type
     /// </remarks>
     class property ExposeExceptionDetails: Boolean
       read FExposeExceptionDetails write FExposeExceptionDetails;
+  end;
+
+  /// <summary>
+  ///   The "error" member the peer sent back, raised as a Delphi exception.
+  ///   Code and Message are the server's own; ErrorData is the untouched
+  ///   "data" member, when the server sent one.
+  /// </summary>
+  /// <remarks>
+  ///   Two things are worth knowing about how this is filled in.
+  ///
+  ///   The inherited Code is read-only and EJRPCException.AfterConstruction
+  ///   stamps -32603 over any code left at 0 - which would silently rewrite a
+  ///   peer that legitimately answered 0. The remote code is therefore kept
+  ///   aside and re-applied in this class's AfterConstruction, which runs
+  ///   *after* the inherited one: whatever came off the wire is what Code
+  ///   reports.
+  ///
+  ///   ErrorData is read from the raw JSON, not from TJRPCErrorDetails.Data:
+  ///   that property is a TValue fed by TJValueSerializer, which maps only
+  ///   numbers, strings and booleans and hands back an empty TValue for an
+  ///   object or an array - so every structured payload (MCP defines several)
+  ///   would be lost on the way in.
+  /// </remarks>
+  EJRPCRemoteError = class(EJRPCException)
+  private
+    FRemoteCode: Integer;
+    FErrorData: TJSONValue;
+  public
+    /// <summary>
+    ///   Takes ownership of AErrorData, which may be nil.
+    /// </summary>
+    constructor Create(ACode: Integer; const AMessage: string; AErrorData: TJSONValue); reintroduce;
+    destructor Destroy; override;
+
+    procedure AfterConstruction; override;
+
+    /// <summary>
+    ///   Builds the exception from the "error" member of AError, taking the
+    ///   structured "data" payload from ARawMessage rather than from
+    ///   TJRPCErrorDetails.Data (see the remark above). The data is cloned into
+    ///   the exception; AError is left untouched.
+    /// </summary>
+    class function FromError(AError: TJRPCError; ARawMessage: TJSONObject): EJRPCRemoteError; static;
+
+    /// <summary>
+    ///   The "data" member of the error object, owned by the exception, or nil
+    ///   when the peer sent none. Clone it if it must outlive the handler.
+    /// </summary>
+    property ErrorData: TJSONValue read FErrorData;
   end;
 
   /// <summary>
@@ -1140,6 +1205,90 @@ begin
   Result := ASource.AsInteger;
 end;
 
+class operator TJRPCID.Equal(const ALeft, ARight: TJRPCID): Boolean;
+begin
+  if ALeft.IsNull or ARight.IsNull then
+    Exit(ALeft.IsNull and ARight.IsNull);
+
+  // Kind first, then value: AsString renders a numeric id as text, so it
+  // cannot tell the string "7" from the number 7.
+  if ALeft.IsInteger and ARight.IsInteger then
+  begin
+    // Int64 when either side is one: AsInteger would truncate a wide id onto
+    // the same value as a different one (2^32 and 0 both become 0).
+    if ALeft.id.IsType<Int64> or ARight.id.IsType<Int64> then
+      Exit(ALeft.id.AsInt64 = ARight.id.AsInt64);
+
+    Exit(ALeft.id.AsInteger = ARight.id.AsInteger);
+  end;
+
+  if ALeft.IsString and ARight.IsString then
+    Exit(ALeft.AsString = ARight.AsString);
+
+  Result := False;
+end;
+
+class operator TJRPCID.NotEqual(const ALeft, ARight: TJRPCID): Boolean;
+begin
+  Result := not (ALeft = ARight);
+end;
+
+{ EJRPCRemoteError }
+
+constructor EJRPCRemoteError.Create(ACode: Integer; const AMessage: string; AErrorData: TJSONValue);
+begin
+  inherited Create(AMessage);
+  FRemoteCode := ACode;
+  FErrorData := AErrorData;
+end;
+
+destructor EJRPCRemoteError.Destroy;
+begin
+  FErrorData.Free;
+  inherited;
+end;
+
+procedure EJRPCRemoteError.AfterConstruction;
+begin
+  inherited;
+  // Runs after EJRPCException.AfterConstruction, which defaults a zero code to
+  // -32603. A peer may legitimately answer 0, so the wire value is restored
+  // here rather than being left to that default.
+  FCode := FRemoteCode;
+end;
+
+class function EJRPCRemoteError.FromError(AError: TJRPCError; ARawMessage: TJSONObject): EJRPCRemoteError;
+var
+  LCode: Integer;
+  LMessage: string;
+  LData: TJSONValue;
+  LErrorNode: TJSONValue;
+begin
+  LCode := JRPC_INTERNAL_ERROR;
+  if AError.Error.Code.HasValue then
+    LCode := AError.Error.Code.Value;
+
+  LMessage := SJRPCUnexpectedError;
+  if AError.Error.Message.HasValue then
+    LMessage := AError.Error.Message.Value;
+
+  // Straight from the raw document: TJRPCErrorDetails.Data is a TValue fed by
+  // TJValueSerializer, which returns an empty TValue for an object or an array
+  // - so a structured payload never survives the trip through the message.
+  LData := nil;
+  if Assigned(ARawMessage) then
+  begin
+    LErrorNode := ARawMessage.FindValue('error');
+    if LErrorNode is TJSONObject then
+    begin
+      LErrorNode := (LErrorNode as TJSONObject).FindValue('data');
+      if Assigned(LErrorNode) then
+        LData := LErrorNode.Clone as TJSONValue;
+    end;
+  end;
+
+  Result := EJRPCRemoteError.Create(LCode, LMessage, LData);
+end;
 
 { TJRPCResponse }
 

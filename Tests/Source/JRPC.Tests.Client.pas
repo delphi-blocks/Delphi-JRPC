@@ -1,4 +1,4 @@
-﻿{******************************************************************************}
+{******************************************************************************}
 {                                                                              }
 {  Delphi-JRPC - JSON-RPC 2.0 Library for Delphi                               }
 {                                                                              }
@@ -77,6 +77,9 @@ type
     [Test] procedure TestNewIdIsThreadSafe;
     [Test] procedure TestIdMismatchIsDetected;
     [Test] procedure TestStringIdAnsweredWithNumberIsDetected;
+    [Test] procedure TestIdEquality;
+    [Test] procedure TestIdInequalityAcrossKinds;
+    [Test] procedure TestIdEqualityIsNotTruncated;
 
     // Errors from the peer
     [Test] procedure TestMethodNotFoundRaisesRemoteError;
@@ -112,6 +115,21 @@ type
     [Test] procedure TestTraceHooksSeeThePayloads;
     [Test] procedure TestExecuteDiscardsTheResult;
     [Test] procedure TestExecuteRawIsUntouched;
+
+    // Streaming answers
+    [Test] procedure TestStreamingNotificationBeforeResponse;
+    [Test] procedure TestStreamingErrorFrameRaises;
+    [Test] procedure TestStreamingEndsWithoutResponseRaises;
+    [Test] procedure TestStreamingWrongIdRaises;
+    [Test] procedure TestStreamingUnexpectedRequestRaises;
+    [Test] procedure TestStreamingBatchFrameRaises;
+    [Test] procedure TestStreamingTraceSeesEachFrame;
+    [Test] procedure TestExecuteStreamDeliversFrames;
+    [Test] procedure TestExecuteStreamCloseAborts;
+    [Test] procedure TestExecuteStreamWithoutStreamingTransportRaises;
+
+    // Configuration
+    [Test] procedure TestNeonConfigIsHonoured;
   end;
 
 implementation
@@ -120,7 +138,138 @@ uses
   System.Classes, System.Rtti, System.Generics.Collections, System.Threading,
   System.SyncObjs,
 
+  Neon.Core.Persistence,
+
   JRPC.Tests.Api;
+
+type
+  /// <summary>
+  ///   A transport that answers with a fixed sequence of JSON-RPC messages, so
+  ///   the streamed cases can be exercised without a socket.
+  /// </summary>
+  TFrameTransport = class(TInterfacedObject, IJRPCClientTransport,
+    IJRPCStreamingTransport, IJRPCAbortableTransport)
+  private
+    FFrames: TArray<string>;
+    FAborted: Integer;
+  public
+    constructor Create(const AFrames: array of string);
+
+    function SendAndReceive(const ARequest: string): string;
+    procedure Send(const ARequest: string);
+    procedure SendAndReceiveFrames(const ARequest: string;
+      const AOnFrame: TJRPCFrameProc);
+    procedure Abort;
+  end;
+
+  /// <summary>
+  ///   Delivers one frame and then blocks until Abort, so that Close can be
+  ///   observed unblocking a read rather than waiting for the peer.
+  /// </summary>
+  TBlockingFrameTransport = class(TInterfacedObject, IJRPCClientTransport,
+    IJRPCStreamingTransport, IJRPCAbortableTransport)
+  private
+    FRelease: TEvent;
+  public
+    constructor Create;
+    destructor Destroy; override;
+
+    function SendAndReceive(const ARequest: string): string;
+    procedure Send(const ARequest: string);
+    procedure SendAndReceiveFrames(const ARequest: string;
+      const AOnFrame: TJRPCFrameProc);
+    procedure Abort;
+  end;
+
+  /// <summary>
+  ///   A type whose member is snake_case on the wire, for the NeonConfig test.
+  ///   A property rather than a field: the default Neon configuration reads
+  ///   properties from a class and fields only from a record.
+  /// </summary>
+  TNeonSnakeProbe = class
+  private
+    FSomeValue: Integer;
+  public
+    property SomeValue: Integer read FSomeValue write FSomeValue;
+  end;
+
+{ TFrameTransport }
+
+constructor TFrameTransport.Create(const AFrames: array of string);
+var
+  LIndex: Integer;
+begin
+  inherited Create;
+  SetLength(FFrames, Length(AFrames));
+  for LIndex := 0 to High(AFrames) do
+    FFrames[LIndex] := AFrames[LIndex];
+end;
+
+function TFrameTransport.SendAndReceive(const ARequest: string): string;
+begin
+  // The streaming interface is what the client uses; this is only here because
+  // IJRPCStreamingTransport descends from it.
+  Result := '';
+end;
+
+procedure TFrameTransport.Send(const ARequest: string);
+begin
+end;
+
+procedure TFrameTransport.SendAndReceiveFrames(const ARequest: string;
+  const AOnFrame: TJRPCFrameProc);
+var
+  LFrame: string;
+begin
+  for LFrame in FFrames do
+  begin
+    if FAborted <> 0 then
+      Exit;
+    if not AOnFrame(LFrame) then
+      Exit;
+  end;
+end;
+
+procedure TFrameTransport.Abort;
+begin
+  TInterlocked.Exchange(FAborted, 1);
+end;
+
+{ TBlockingFrameTransport }
+
+constructor TBlockingFrameTransport.Create;
+begin
+  inherited Create;
+  FRelease := TEvent.Create(nil, True, False, '');
+end;
+
+destructor TBlockingFrameTransport.Destroy;
+begin
+  FRelease.Free;
+  inherited;
+end;
+
+function TBlockingFrameTransport.SendAndReceive(const ARequest: string): string;
+begin
+  Result := '';
+end;
+
+procedure TBlockingFrameTransport.Send(const ARequest: string);
+begin
+end;
+
+procedure TBlockingFrameTransport.SendAndReceiveFrames(const ARequest: string;
+  const AOnFrame: TJRPCFrameProc);
+begin
+  AOnFrame('{"jsonrpc":"2.0","method":"notifications/first"}');
+  // A read that only the Abort can end - the shape of a long-lived stream.
+  FRelease.WaitFor(5000);
+end;
+
+procedure TBlockingFrameTransport.Abort;
+begin
+  FRelease.SetEvent;
+end;
 
 { TJRPCClientTest }
 
@@ -897,6 +1046,370 @@ begin
 
   Assert.AreEqual('{not json', FSent, 'the raw payload goes out verbatim');
   Assert.IsTrue(LReply.Contains('-32700'), 'the server answers a parse error: ' + LReply);
+end;
+
+procedure TJRPCClientTest.TestIdEquality;
+var
+  LFirst, LSecond, LAbsent, LDefaultAbsent: TJRPCID;
+begin
+  LFirst := 7;
+  LSecond := 7;
+  LAbsent := nil;
+
+  Assert.IsTrue(LFirst = LSecond, 'the same number is the same id');
+  Assert.IsFalse(LFirst = LAbsent, 'an id is not the absent id');
+  Assert.IsTrue(LAbsent = LDefaultAbsent, 'two absent ids are equal');
+end;
+
+procedure TJRPCClientTest.TestIdInequalityAcrossKinds;
+var
+  LNumber, LText: TJRPCID;
+begin
+  LNumber := 7;
+  LText := '7';
+
+  // AsString would render both as '7': the kind is part of the identity.
+  Assert.IsFalse(LNumber = LText);
+  Assert.IsTrue(LNumber <> LText);
+end;
+
+procedure TJRPCClientTest.TestIdEqualityIsNotTruncated;
+var
+  LLarge, LLargeAgain, LZero: TJRPCID;
+begin
+  // 2^32: AsInteger would truncate it to 0 and make it equal to the id 0.
+  LLarge := Int64(4294967296);
+  LLargeAgain := Int64(4294967296);
+  LZero := 0;
+
+  Assert.IsFalse(LLarge = LZero);
+  Assert.IsTrue(LLarge = LLargeAgain);
+end;
+
+procedure TJRPCClientTest.TestStreamingNotificationBeforeResponse;
+var
+  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+  LCount: Integer;
+  LMethod: string;
+begin
+  LCount := 0;
+  LMethod := '';
+
+  LTransport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}',
+    '{"jsonrpc":"2.0","id":7,"result":42}']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  FClient.OnNotification :=
+    procedure(const ANotification: TJRPCNotification)
+    begin
+      Inc(LCount);
+      LMethod := ANotification.Method;
+    end;
+
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    Assert.AreEqual<Integer>(42, FClient.ExecuteAs<Integer>(LBuilder));
+    Assert.AreEqual(1, LCount, 'the notification must be delivered');
+    Assert.AreEqual('notifications/progress', LMethod);
+  finally
+    FClient.Transport := nil;
+    FClient.OnNotification := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingErrorFrameRaises;
+var
+  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+begin
+  LTransport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"bad args","data":{"detail":1}}}']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    try
+      FClient.ExecuteAs<Integer>(LBuilder);
+      Assert.Fail('expected EJRPCRemoteError');
+    except
+      on E: EJRPCRemoteError do
+      begin
+        Assert.AreEqual(-32602, E.Code);
+        Assert.IsNotNull(E.ErrorData);
+        Assert.AreEqual(1, (E.ErrorData as TJSONObject).GetValue<Integer>('detail'));
+      end;
+    end;
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingEndsWithoutResponseRaises;
+var
+  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+begin
+  LTransport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","method":"notifications/progress","params":{}}']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    try
+      FClient.ExecuteAs<Integer>(LBuilder);
+      Assert.Fail('expected EJRPCClientError');
+    except
+      on E: EJRPCClientError do
+        Assert.IsTrue(E.Message <> '', 'the failure must explain itself');
+    end;
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingWrongIdRaises;
+var
+  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+begin
+  LTransport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","id":8,"result":42}']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    try
+      FClient.ExecuteAs<Integer>(LBuilder);
+      Assert.Fail('expected an id mismatch');
+    except
+      on E: EJRPCClientError do
+        Assert.IsTrue(E.Message.Contains('does not match'), E.Message);
+    end;
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingUnexpectedRequestRaises;
+var
+  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+begin
+  // A bidirectional peer may send a request; this client has no channel to
+  // answer it, so it must say so rather than drop it.
+  LTransport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","id":99,"method":"server/ping"}']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    try
+      FClient.ExecuteAs<Integer>(LBuilder);
+      Assert.Fail('expected EJRPCClientError');
+    except
+      on E: EJRPCClientError do
+        Assert.IsTrue(E.Message <> '', 'the failure must explain itself');
+    end;
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingBatchFrameRaises;
+var
+  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+begin
+  LTransport := TFrameTransport.Create([
+    '[{"jsonrpc":"2.0","id":7,"result":1},{"jsonrpc":"2.0","id":8,"result":2}]']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    try
+      FClient.ExecuteAs<Integer>(LBuilder);
+      Assert.Fail('expected EJRPCClientError');
+    except
+      on E: EJRPCClientError do
+        Assert.IsTrue(E.Message <> '', 'the failure must explain itself');
+    end;
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingTraceSeesEachFrame;
+var
+  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+  LCount: Integer;
+begin
+  LCount := 0;
+
+  LTransport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","method":"notifications/progress","params":{}}',
+    '{"jsonrpc":"2.0","id":7,"result":42}']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  FClient.OnAfterReceive :=
+    procedure(const AJSON: string)
+    begin
+      Inc(LCount);
+    end;
+
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    FClient.ExecuteAs<Integer>(LBuilder);
+    Assert.AreEqual(2, LCount, 'OnAfterReceive sees every frame, not the whole body');
+  finally
+    FClient.Transport := nil;
+    FClient.OnAfterReceive := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestExecuteStreamDeliversFrames;
+var
+  LTransport: IJRPCStreamingTransport;
+  LStream: IJRPCStream;
+  LCount: Integer;
+begin
+  LCount := 0;
+
+  LTransport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","method":"notifications/first"}',
+    '{"jsonrpc":"2.0","method":"notifications/second"}',
+    '{"jsonrpc":"2.0","method":"notifications/third"}']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LStream := FClient.ExecuteStream(
+      TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
+      function(const AJSON: string): Boolean
+      begin
+        Inc(LCount);
+        Result := True;
+      end);
+
+    Assert.IsTrue(LStream.Wait(5000), 'the stream must finish');
+    Assert.IsTrue(LStream.Completed);
+    Assert.AreEqual(3, LCount, 'every frame must be delivered');
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestExecuteStreamCloseAborts;
+var
+  LTransport: IJRPCStreamingTransport;
+  LStream: IJRPCStream;
+  LFirstFrame: TEvent;
+  LFrames: Integer;
+begin
+  LFrames := 0;
+  LFirstFrame := TEvent.Create(nil, True, False, '');
+  LTransport := TBlockingFrameTransport.Create;
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LStream := FClient.ExecuteStream(
+      TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
+      function(const AJSON: string): Boolean
+      begin
+        Inc(LFrames);
+        LFirstFrame.SetEvent;
+        Result := True;
+      end);
+
+    Assert.IsTrue(LFirstFrame.WaitFor(5000) = wrSignaled,
+      'the first frame must arrive');
+    Assert.IsFalse(LStream.Wait(100), 'the read is still blocked');
+
+    LStream.Close;
+
+    Assert.IsTrue(LStream.Wait(5000), 'Close must unblock the read');
+    Assert.IsTrue(LStream.Completed);
+    Assert.AreEqual(1, LFrames);
+  finally
+    LStream := nil;
+    FClient.Transport := nil;
+    LFirstFrame.Free;
+  end;
+end;
+
+procedure TJRPCClientTest.TestExecuteStreamWithoutStreamingTransportRaises;
+begin
+  FClient.Transport := nil;
+  FClient.OnTransport :=
+    function(const ARequest: string): string
+    begin
+      Result := '{}';
+    end;
+
+  try
+    FClient.ExecuteStream(
+      TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'), nil);
+    Assert.Fail('expected EJRPCClientError');
+  except
+    on E: EJRPCClientError do
+      Assert.IsTrue(E.Message <> '', 'the refusal must explain itself');
+  end;
+end;
+
+procedure TJRPCClientTest.TestNeonConfigIsHonoured;
+var
+  LProbe: TNeonSnakeProbe;
+begin
+  // Echo the id the client chose, so the test does not depend on the shared
+  // id counter's value.
+  FClient.OnTransport :=
+    function(const ARequest: string): string
+    var
+      LRequest: TJSONValue;
+    begin
+      LRequest := TJSONObject.ParseJSONValue(ARequest);
+      try
+        Result := Format('{"jsonrpc":"2.0","id":%s,"result":{"some_value":42}}',
+          [(LRequest as TJSONObject).GetValue('id').ToJSON]);
+      finally
+        LRequest.Free;
+      end;
+    end;
+
+  // The default configuration expects someValue; Snake is what reads this one.
+  FClient.NeonConfig := TNeonConfiguration.Snake;
+
+  LProbe := FClient.ExecuteAs<TNeonSnakeProbe>(
+    TJRPCRequestBuilder.New.SetMethod('config/probe'));
+  try
+    Assert.AreEqual(42, LProbe.SomeValue);
+  finally
+    LProbe.Free;
+  end;
 end;
 
 end.
