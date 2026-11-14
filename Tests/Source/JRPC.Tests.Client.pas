@@ -144,6 +144,7 @@ type
     [Test] procedure TestExecuteStreamCloseAborts;
     [Test] procedure TestExecuteStreamWithoutStreamingTransportRaises;
     [Test] procedure TestExecuteStreamReleasesSelfCapturingCallback;
+    [Test] procedure TestExecuteStreamClosedBeforeItStartsEnds;
 
     // Configuration
     [Test] procedure TestNeonConfigIsHonoured;
@@ -219,6 +220,27 @@ type
   end;
 
   /// <summary>
+  ///   A silent peer behind a transport that clears its abort state as each
+  ///   call starts - the way a reusable transport does, so that an Abort only
+  ///   speaks for the call in progress. The read then waits for Abort, or
+  ///   gives up after 3 s.
+  /// </summary>
+  TResettingSilentTransport = class(TInterfacedObject, IJRPCClientTransport,
+    IJRPCStreamingTransport, IJRPCAbortableTransport)
+  private
+    FAborted: Integer;
+    FCalls: Integer;
+  public
+    function SendAndReceive(const ARequest: string): string;
+    procedure Send(const ARequest: string);
+    procedure SendAndReceiveFrames(const ARequest: string;
+      const AOnFrame: TJRPCFrameProc);
+    procedure Abort;
+
+    property Calls: Integer read FCalls;
+  end;
+
+  /// <summary>
   ///   Sets a flag when it is freed: captured by a callback, it tells when the
   ///   callback's closure frame goes.
   /// </summary>
@@ -229,6 +251,40 @@ type
     constructor Create(AFreed: PBoolean);
     destructor Destroy; override;
   end;
+
+{ TResettingSilentTransport }
+
+function TResettingSilentTransport.SendAndReceive(const ARequest: string): string;
+begin
+  Result := '';
+end;
+
+procedure TResettingSilentTransport.Send(const ARequest: string);
+begin
+end;
+
+procedure TResettingSilentTransport.SendAndReceiveFrames(const ARequest: string;
+  const AOnFrame: TJRPCFrameProc);
+var
+  LWaited: Integer;
+begin
+  TInterlocked.Increment(FCalls);
+
+  // A new call starts clean: an Abort that came before it is forgotten
+  TInterlocked.Exchange(FAborted, 0);
+
+  LWaited := 0;
+  while (TInterlocked.CompareExchange(FAborted, 0, 0) = 0) and (LWaited < 3000) do
+  begin
+    Sleep(5);
+    Inc(LWaited, 5);
+  end;
+end;
+
+procedure TResettingSilentTransport.Abort;
+begin
+  TInterlocked.Exchange(FAborted, 1);
+end;
 
 { TReleaseProbe }
 
@@ -1605,6 +1661,39 @@ begin
       'a callback that captures its own stream must not keep it alive');
   finally
     FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestExecuteStreamClosedBeforeItStartsEnds;
+var
+  LTransport: TResettingSilentTransport;
+  LStream: IJRPCStream;
+  LRound: Integer;
+begin
+  // Close right after ExecuteStream usually lands before the stream thread
+  // has called the transport. The transport then clears the abort as its
+  // call starts, and waits on a silent peer: the close was lost. Several
+  // rounds, since which side wins is up to the scheduler.
+  for LRound := 1 to 10 do
+  begin
+    LTransport := TResettingSilentTransport.Create;
+    FClient.Transport := LTransport;
+    FClient.OnTransport := nil;
+    try
+      LStream := FClient.ExecuteStream(
+        TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
+        function(const AJSON: string): Boolean
+        begin
+          Result := True;
+        end);
+      LStream.Close;
+
+      Assert.IsTrue(LStream.Wait(1500),
+        Format('round %d: a stream closed before it started must end', [LRound]));
+      LStream := nil;
+    finally
+      FClient.Transport := nil;
+    end;
   end;
 end;
 

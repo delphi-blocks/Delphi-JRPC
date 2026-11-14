@@ -222,6 +222,13 @@ type
   ///   IJRPCStream.Close calls Abort when the transport implements this, which
   ///   is what makes closing a long-lived stream prompt rather than a matter of
   ///   waiting for the peer to send something else.
+  ///
+  ///   A stream closed before its thread calls SendAndReceiveFrames never
+  ///   calls it. A transport that clears its abort state when a call starts
+  ///   should do so first thing and check it again before it blocks: an
+  ///   Abort landing in the few instructions between the stream's check and
+  ///   that reset is still wiped, and keeping that window short is all a
+  ///   transport can do about it.
   /// </remarks>
   IJRPCAbortableTransport = interface
   ['{B2C3D4E5-6F70-4B81-9CAD-1E2F3A4B5C6D}']
@@ -1225,6 +1232,14 @@ procedure TJRPCStream.Run;
 begin
   try
     try
+      // Closed before this thread got going: nothing is sent at all. Leaving
+      // it to Abort would not do - a transport typically clears its abort
+      // state as a call starts (an Abort speaks for the call in progress), so
+      // an Abort that came first would be wiped and the read would wait on a
+      // peer that may never send anything.
+      if FClosed <> 0 then
+        Exit;
+
       FTransport.SendAndReceiveFrames(FPayload,
         function(const AJSON: string): Boolean
         begin
