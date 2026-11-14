@@ -483,6 +483,11 @@ type
     ///   through the client's OnAfterReceive/OnError and keeps a reference to
     ///   it. Close and Wait before freeing the client.
     ///
+    ///   The stream holds AOnFrame only while it reads: the callback is
+    ///   released when the read ends, before Wait returns. A callback may
+    ///   therefore capture the stream it belongs to (to Close it from inside)
+    ///   without the two keeping each other alive.
+    ///
     ///   One client drives one transport, so two concurrent streams need a
     ///   transport that multiplexes them - or a client each.
     /// </remarks>
@@ -1213,6 +1218,13 @@ begin
         FClient.ReportError(E);
     end;
   finally
+    // The callback is done with: release it now rather than with the stream.
+    // A callback that captures its own stream - the natural way to Close it
+    // from inside - would otherwise keep the stream alive, and the stream the
+    // callback, and neither would ever be freed. Released before the event,
+    // so a Wait that returns finds it gone. Nothing below may use FClient:
+    // what the callback held may have owned it.
+    FOnFrame := nil;
     FDone.SetEvent;
   end;
 end;

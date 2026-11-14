@@ -44,6 +44,13 @@ type
     procedure StubReply(const AReply: string);
 
     /// <summary>
+    ///   Runs a stream whose callback captures the stream itself, and returns
+    ///   without clearing anything - the way a caller's method ends. A probe
+    ///   captured alongside sets AFreed when the callback's frame is released.
+    /// </summary>
+    procedure RunSelfCapturingStream(AFreed: PBoolean);
+
+    /// <summary>
     ///   A bare Request, for the cases the builder cannot serve.
     /// </summary>
     /// <remarks>
@@ -127,6 +134,7 @@ type
     [Test] procedure TestExecuteStreamDeliversFrames;
     [Test] procedure TestExecuteStreamCloseAborts;
     [Test] procedure TestExecuteStreamWithoutStreamingTransportRaises;
+    [Test] procedure TestExecuteStreamReleasesSelfCapturingCallback;
 
     // Configuration
     [Test] procedure TestNeonConfigIsHonoured;
@@ -192,6 +200,32 @@ type
   public
     property SomeValue: Integer read FSomeValue write FSomeValue;
   end;
+
+  /// <summary>
+  ///   Sets a flag when it is freed: captured by a callback, it tells when the
+  ///   callback's closure frame goes.
+  /// </summary>
+  TReleaseProbe = class(TInterfacedObject)
+  private
+    FFreed: PBoolean;
+  public
+    constructor Create(AFreed: PBoolean);
+    destructor Destroy; override;
+  end;
+
+{ TReleaseProbe }
+
+constructor TReleaseProbe.Create(AFreed: PBoolean);
+begin
+  inherited Create;
+  FFreed := AFreed;
+end;
+
+destructor TReleaseProbe.Destroy;
+begin
+  FFreed^ := True;
+  inherited;
+end;
 
 { TFrameTransport }
 
@@ -1358,6 +1392,58 @@ begin
     LStream := nil;
     FClient.Transport := nil;
     LFirstFrame.Free;
+  end;
+end;
+
+procedure TJRPCClientTest.RunSelfCapturingStream(AFreed: PBoolean);
+var
+  LStream: IJRPCStream;
+  LProbe: IInterface;
+begin
+  LProbe := TReleaseProbe.Create(AFreed);
+
+  LStream := FClient.ExecuteStream(
+    TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
+    function(const AJSON: string): Boolean
+    begin
+      // Captures the stream: the natural way to stop it from its own
+      // callback. Never true here - capturing it is what matters.
+      if AJSON = '' then
+        LStream.Close;
+      Result := Assigned(LProbe);
+    end);
+
+  Assert.IsTrue(LStream.Wait(5000), 'the stream must finish');
+  // No LStream := nil: the method ends with the stream still captured, as a
+  // caller's would.
+end;
+
+procedure TJRPCClientTest.TestExecuteStreamReleasesSelfCapturingCallback;
+var
+  LFreed: Boolean;
+  LWait: Integer;
+begin
+  LFreed := False;
+
+  FClient.Transport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","method":"notifications/first"}']);
+  FClient.OnTransport := nil;
+  try
+    RunSelfCapturingStream(@LFreed);
+
+    // The stream thread lets go of its own reference just after the event the
+    // Wait saw: give it a moment.
+    LWait := 0;
+    while not LFreed and (LWait < 2000) do
+    begin
+      Sleep(20);
+      Inc(LWait, 20);
+    end;
+
+    Assert.IsTrue(LFreed,
+      'a callback that captures its own stream must not keep it alive');
+  finally
+    FClient.Transport := nil;
   end;
 end;
 
