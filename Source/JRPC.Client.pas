@@ -838,70 +838,89 @@ begin
   LRemoteError := nil;
   LDone := False;
 
-  ATransport.SendAndReceiveFrames(PreparePayload(ARequest.ToJson),
-    function(const AJSON: string): Boolean
-    var
-      LDocument: TJSONValue;
-      LMessages: TJRPCMessages;
-      LMessage: TJRPCMessage;
-    begin
-      // Once the response (or the error) has arrived there is nothing left to
-      // read: tell the transport to stop.
-      Result := not LDone;
-      if not Result then
-        Exit;
+  try
+    ATransport.SendAndReceiveFrames(PreparePayload(ARequest.ToJson),
+      function(const AJSON: string): Boolean
+      var
+        LDocument: TJSONValue;
+        LMessages: TJRPCMessages;
+        LMessage: TJRPCMessage;
+      begin
+        // Once the response (or the error) has arrived there is nothing left to
+        // read: tell the transport to stop.
+        Result := not LDone;
+        if not Result then
+          Exit;
 
-      if Assigned(FOnAfterReceive) then
-        FOnAfterReceive(AJSON);
+        if Assigned(FOnAfterReceive) then
+          FOnAfterReceive(AJSON);
 
-      LDocument := TJSONObject.ParseJSONValue(AJSON);
-      if not Assigned(LDocument) then
-        raise EJRPCParseError.Create(SJRPCInvalidJSONReceived);
+        LDocument := TJSONObject.ParseJSONValue(AJSON);
+        if not Assigned(LDocument) then
+          raise EJRPCParseError.Create(SJRPCInvalidJSONReceived);
 
-      try
-        LMessages := TJRPCMessages.CreateFromJson(LDocument);
         try
-          if LMessages.Count <> 1 then
-            raise EJRPCClientError.CreateFmt(SJRPCClientNotSingleReply,
-              [LMessages.Count]);
+          LMessages := TJRPCMessages.CreateFromJson(LDocument);
+          try
+            if LMessages.Count <> 1 then
+              raise EJRPCClientError.CreateFmt(SJRPCClientNotSingleReply,
+                [LMessages.Count]);
 
-          LMessage := LMessages.List[0];
+            LMessage := LMessages.List[0];
 
-          if LMessage is TJRPCResponse then
-          begin
-            CheckReplyId((LMessage as TJRPCResponse).Id, ARequest.Id);
-            // Result is never nil - the constructor installs a TJSONNull - so a
-            // "result" of null comes back as a live value, not as nil.
-            LResult := (LMessage as TJRPCResponse).Result.Clone as TJSONValue;
-            LDone := True;
-          end
-          else if LMessage is TJRPCError then
-          begin
-            // A null id is accepted here, as it is in ReadReply: per the spec
-            // that is what a peer answers when it could not read the id.
-            if not (LMessage as TJRPCError).Id.IsNull then
-              CheckReplyId((LMessage as TJRPCError).Id, ARequest.Id);
+            if LMessage is TJRPCResponse then
+            begin
+              CheckReplyId((LMessage as TJRPCResponse).Id, ARequest.Id);
+              // Result is never nil - the constructor installs a TJSONNull - so a
+              // "result" of null comes back as a live value, not as nil.
+              LResult := (LMessage as TJRPCResponse).Result.Clone as TJSONValue;
+              LDone := True;
+            end
+            else if LMessage is TJRPCError then
+            begin
+              // A null id is accepted here, as it is in ReadReply: per the spec
+              // that is what a peer answers when it could not read the id.
+              if not (LMessage as TJRPCError).Id.IsNull then
+                CheckReplyId((LMessage as TJRPCError).Id, ARequest.Id);
 
-            LRemoteError := EJRPCRemoteError.FromError(LMessage as TJRPCError,
-              LDocument as TJSONObject);
-            LDone := True;
-          end
-          else if LMessage is TJRPCNotification then
-          begin
-            if Assigned(FOnNotification) then
-              FOnNotification(LMessage as TJRPCNotification);
-          end
-          else
-            // A request on the same stream is something only a bidirectional
-            // connection can answer; this client has no such channel.
-            raise EJRPCClientError.Create(SJRPCClientStreamUnexpectedRequest);
+              LRemoteError := EJRPCRemoteError.FromError(LMessage as TJRPCError,
+                LDocument as TJSONObject);
+              LDone := True;
+            end
+            else if LMessage is TJRPCNotification then
+            begin
+              if Assigned(FOnNotification) then
+                FOnNotification(LMessage as TJRPCNotification);
+            end
+            else
+              // A request on the same stream is something only a bidirectional
+              // connection can answer; this client has no such channel.
+              raise EJRPCClientError.Create(SJRPCClientStreamUnexpectedRequest);
+          finally
+            LMessages.Free;
+          end;
         finally
-          LMessages.Free;
+          LDocument.Free;
         end;
-      finally
-        LDocument.Free;
+      end);
+  except
+    on E: Exception do
+    begin
+      // Before the answer: a failure of the call, raised as it is. Whatever
+      // the callback had built is freed rather than leaked.
+      if not LDone then
+      begin
+        LResult.Free;
+        LRemoteError.Free;
+        raise;
       end;
-    end);
+
+      // After the answer: the transport failed winding down (closing the
+      // body, a connection that ended under it). The answer is complete and
+      // is what the caller asked for - it wins over the failure, which is
+      // dropped. The exception object is freed by the except block.
+    end;
+  end;
 
   // Raised only once the frames are done: the exception owns a clone, so
   // nothing it carries dies with the parse tree.

@@ -131,6 +131,9 @@ type
     [Test] procedure TestStreamingUnexpectedRequestRaises;
     [Test] procedure TestStreamingBatchFrameRaises;
     [Test] procedure TestStreamingTraceSeesEachFrame;
+    [Test] procedure TestStreamingResultSurvivesFailureAfterIt;
+    [Test] procedure TestStreamingErrorSurvivesFailureAfterIt;
+    [Test] procedure TestStreamingFailureBeforeAnswerRaises;
     [Test] procedure TestExecuteStreamDeliversFrames;
     [Test] procedure TestExecuteStreamCloseAborts;
     [Test] procedure TestExecuteStreamWithoutStreamingTransportRaises;
@@ -160,8 +163,16 @@ type
   private
     FFrames: TArray<string>;
     FAborted: Integer;
+    FFailure: string;
   public
     constructor Create(const AFrames: array of string);
+
+    /// <summary>
+    ///   When set, the read ends by raising this - after the callback stopped
+    ///   it, or after the last frame - the way a transport that fails while
+    ///   winding down does.
+    /// </summary>
+    property Failure: string read FFailure write FFailure;
 
     function SendAndReceive(const ARequest: string): string;
     procedure Send(const ARequest: string);
@@ -260,8 +271,11 @@ begin
     if FAborted <> 0 then
       Exit;
     if not AOnFrame(LFrame) then
-      Exit;
+      Break;
   end;
+
+  if FFailure <> '' then
+    raise Exception.Create(FFailure);
 end;
 
 procedure TFrameTransport.Abort;
@@ -1181,6 +1195,87 @@ begin
         Assert.AreEqual(1, (E.ErrorData as TJSONObject).GetValue<Integer>('detail'));
       end;
     end;
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingResultSurvivesFailureAfterIt;
+var
+  LTransport: TFrameTransport;
+  LBuilder: IJRPCRequestBuilder;
+begin
+  // The answer arrives, the callback stops the read, and the transport then
+  // fails winding down. The caller asked for the answer and has it: it must
+  // get it, and the clone made for it must not leak.
+  LTransport := TFrameTransport.Create(['{"jsonrpc":"2.0","id":7,"result":42}']);
+  LTransport.Failure := 'connection reset while closing';
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    Assert.AreEqual(42, FClient.ExecuteAs<Integer>(LBuilder));
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingErrorSurvivesFailureAfterIt;
+var
+  LTransport: TFrameTransport;
+  LBuilder: IJRPCRequestBuilder;
+begin
+  // The same with an error answer: the peer's error is what the caller gets,
+  // not the transport's - and the exception built for it must not leak.
+  LTransport := TFrameTransport.Create([
+    '{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"bad args","data":{"detail":1}}}']);
+  LTransport.Failure := 'connection reset while closing';
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    try
+      FClient.ExecuteAs<Integer>(LBuilder);
+      Assert.Fail('expected EJRPCRemoteError');
+    except
+      on E: EJRPCRemoteError do
+        Assert.AreEqual(-32602, E.Code);
+    end;
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingFailureBeforeAnswerRaises;
+var
+  LTransport: TFrameTransport;
+  LBuilder: IJRPCRequestBuilder;
+  LMessage: string;
+begin
+  // No answer yet: the failure is the outcome of the call, raised as it is.
+  LTransport := TFrameTransport.Create(['{"jsonrpc":"2.0","method":"notifications/progress"}']);
+  LTransport.Failure := 'connection reset mid-stream';
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    LMessage := '';
+    try
+      FClient.ExecuteAs<Integer>(LBuilder);
+    except
+      on E: Exception do
+        LMessage := E.Message;
+    end;
+    Assert.AreEqual('connection reset mid-stream', LMessage);
   finally
     FClient.Transport := nil;
   end;
