@@ -103,6 +103,8 @@ resourcestring
   SJRPCConnectionNotSingle = 'The peer sent %d messages where exactly one was expected';
   SJRPCConnectionUnknownId = 'The peer answered id [%s], which is not pending';
   SJRPCConnectionNullId = 'The peer sent an error with a null id: %s';
+  SJRPCConnectionInvalidResponse = 'The peer sent a response that could not be read: %s';
+  SJRPCConnectionInvalidNotification = 'The peer sent a notification that could not be read: %s';
   SJRPCConnectionUnexpected = 'The peer sent a %s where a response, an error, a notification or a request was expected';
 
 type

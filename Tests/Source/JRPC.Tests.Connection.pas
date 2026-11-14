@@ -84,6 +84,9 @@ type
     [Test] procedure TestNotifySends;
     [Test] procedure TestUnknownIdIsDropped;
     [Test] procedure TestTwoConcurrentCalls;
+    [Test] procedure TestMalformedPeerRequestIsAnsweredNotRouted;
+    [Test] procedure TestMalformedResponseFailsCallLocally;
+    [Test] procedure TestMalformedNotificationIsReportedNotAnswered;
   end;
 
 implementation
@@ -601,6 +604,106 @@ begin
   Assert.IsTrue(LId1 <> LId2, 'each call gets its own id');
   Assert.AreEqual(LId1, LResult1, 'the first call got the other answer');
   Assert.AreEqual(LId2, LResult2, 'the second call got the other answer');
+end;
+
+procedure TJRPCConnectionTest.TestMalformedPeerRequestIsAnsweredNotRouted;
+var
+  LRequest: TJRPCRequest;
+  LResponse: TJRPCResponse;
+  LId: string;
+begin
+  // The peer sends a request it got wrong ("jsonrpc":"1.0") under the same id
+  // as our pending call - ids collide easily, both sides count from 1. The
+  // parser's -32600 is an answer the peer is owed, not an error the peer sent:
+  // it must not complete our call, and it must go back to the peer.
+  FTransport.OnSend :=
+    procedure(const AText: string)
+    begin
+      // Only our own request triggers the exchange, not the reply we send
+      if not AText.Contains('"method"') then
+        Exit;
+
+      LId := RequestIdOf(AText);
+      FTransport.Push(Format('{"jsonrpc":"1.0","id":%s,"method":"peer/ask"}', [LId]));
+      FTransport.Push(EchoReply(AText));
+    end;
+
+  LRequest := NewRequest('math/sum');
+  try
+    LResponse := FConnection.Call(LRequest, 2000);
+    try
+      Assert.AreEqual(LRequest.Id.AsString, LResponse.Result.ToJSON,
+        'the call completes with its real answer');
+    finally
+      LResponse.Free;
+    end;
+
+    // Our request, then the rejection of the peer's
+    Assert.AreEqual(2, FTransport.SentCount);
+    Assert.IsTrue(FTransport.SentText(1).Contains('-32600'), FTransport.SentText(1));
+    Assert.IsTrue(FTransport.SentText(1).Contains('"id":' + LId), FTransport.SentText(1));
+  finally
+    LRequest.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestMalformedResponseFailsCallLocally;
+var
+  LRequest: TJRPCRequest;
+begin
+  // A response carrying both "result" and "error" is not a response. The call
+  // it names fails - as a client error, since the peer never said -32600.
+  FTransport.OnSend :=
+    procedure(const AText: string)
+    begin
+      FTransport.Push(Format(
+        '{"jsonrpc":"2.0","id":%s,"result":1,"error":{"code":-1,"message":"m"}}',
+        [RequestIdOf(AText)]));
+    end;
+
+  LRequest := NewRequest('math/sum');
+  try
+    try
+      FConnection.Call(LRequest, 2000).Free;
+      Assert.Fail('expected EJRPCClientError');
+    except
+      on E: EJRPCRemoteError do
+        Assert.Fail('a response the parser rejected was reported as the peer''s error: ' + E.Message);
+      on E: EJRPCClientError do
+        Assert.IsTrue(E.Message.Contains('could not be read'), E.Message);
+    end;
+
+    // A response is never answered
+    Assert.AreEqual(1, FTransport.SentCount);
+  finally
+    LRequest.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestMalformedNotificationIsReportedNotAnswered;
+var
+  LReported: TEvent;
+  LMessage: string;
+begin
+  LReported := TEvent.Create(nil, True, False, '');
+  try
+    FConnection.OnError :=
+      procedure(E: Exception)
+      begin
+        LMessage := E.Message;
+        LReported.SetEvent;
+      end;
+
+    FTransport.Push('{"jsonrpc":"1.0","method":"peer/tell"}');
+
+    Assert.IsTrue(LReported.WaitFor(3000) = wrSignaled, 'the rejection must be reported');
+    Assert.IsTrue(LMessage.Contains('notification'), LMessage);
+    // Notifications are never answered, malformed or not
+    Assert.AreEqual(0, FTransport.SentCount);
+  finally
+    FConnection.OnError := nil;
+    LReported.Free;
+  end;
 end;
 
 initialization

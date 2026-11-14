@@ -195,6 +195,8 @@ type
     procedure DispatchMessage(const AText: string);
     procedure DispatchNotification(ANotification: TJRPCNotification);
     procedure DispatchRequest(ARequest: TJRPCRequest);
+    procedure RejectPeerMessage(AError: TJRPCError);
+    procedure FailInvalidResponse(AError: TJRPCError);
     procedure CompletePending(const AKey: string; AResponse: TJRPCResponse; AError: Exception);
     procedure FailPending(const AMessage: string);
     procedure Forget(const AKey: string);
@@ -733,6 +735,17 @@ begin
         LId := (LMessage as TJRPCResponse).Id;
         CompletePending(KeyOf(LId), (LMessage as TJRPCResponse).Clone, nil);
       end
+      else if (LMessage is TJRPCError) and
+        Assigned((LDocument as TJSONObject).GetValue('method')) then
+        // Not an error the peer sent: a request or a notification of the peer
+        // that this side could not read, and the error is the parser's
+        RejectPeerMessage(LMessage as TJRPCError)
+      else if (LMessage is TJRPCError) and not (LMessage as TJRPCError).Request then
+        // A response this side could not read. The parser marks every error
+        // it really read from the peer with Request; one it built itself from
+        // a message with no "method" never has it. Completing the call with it
+        // would put words in the peer's mouth.
+        FailInvalidResponse(LMessage as TJRPCError)
       else if LMessage is TJRPCError then
       begin
         LId := (LMessage as TJRPCError).Id;
@@ -773,6 +786,55 @@ procedure TJRPCConnection.DispatchNotification(ANotification: TJRPCNotification)
 begin
   if Assigned(FOnNotification) then
     FOnNotification(ANotification);
+end;
+
+procedure TJRPCConnection.RejectPeerMessage(AError: TJRPCError);
+var
+  LReport: EJRPCClientError;
+begin
+  if AError.Request then
+  begin
+    // A notification: never answered, however malformed. The peer is not
+    // waiting for anything, so the rejection is only reported.
+    LReport := EJRPCClientError.CreateFmt(SJRPCConnectionInvalidNotification,
+      [AError.Error.Message.Value]);
+    try
+      Logger.LogWarning(LReport.Message);
+      ReportError(LReport);
+    finally
+      LReport.Free;
+    end;
+    Exit;
+  end;
+
+  // A request: the peer is waiting, and the error the parser built is the
+  // answer a server owes it (-32600, -32602 ...) with the request's id, or a
+  // null id when the id itself could not be read.
+  SendText(AError.ToJson);
+end;
+
+procedure TJRPCConnection.FailInvalidResponse(AError: TJRPCError);
+var
+  LText: string;
+  LReport: EJRPCClientError;
+begin
+  LText := Format(SJRPCConnectionInvalidResponse, [AError.Error.Message.Value]);
+
+  // A response is never answered. With an id to correlate it, the call it was
+  // meant for fails - locally, as a client error, not as a remote one.
+  if not AError.Id.IsNull then
+  begin
+    CompletePending(KeyOf(AError.Id), nil, EJRPCClientError.Create(LText));
+    Exit;
+  end;
+
+  LReport := EJRPCClientError.Create(LText);
+  try
+    Logger.LogWarning(LText);
+    ReportError(LReport);
+  finally
+    LReport.Free;
+  end;
 end;
 
 procedure TJRPCConnection.DispatchRequest(ARequest: TJRPCRequest);
