@@ -173,7 +173,14 @@ type
   ///
   ///   One message per frame: a batch answer is reported to OnError rather
   ///   than fanned out, and the calls it answers time out. Send batches one
-  ///   call at a time on this endpoint.
+  ///   call at a time on this endpoint. A batch the peer sends is reported
+  ///   too, and each request in it is answered -32600 under its own id.
+  ///
+  ///   Whatever the peer is owed is answered as TJRPCServer would answer it:
+  ///   -32700 with a null id for a frame that is not JSON, -32600 for JSON
+  ///   that is no message, and an error under the request's id when OnRequest
+  ///   raises (its own code for an EJRPCException, -32603 otherwise). Blank
+  ///   frames are skipped.
   /// </remarks>
   TJRPCConnection = class
   private
@@ -196,6 +203,8 @@ type
     procedure DispatchNotification(ANotification: TJRPCNotification);
     procedure DispatchRequest(ARequest: TJRPCRequest);
     procedure RejectPeerMessage(AError: TJRPCError);
+    procedure RejectPeerBatch(AMessages: TJRPCMessages);
+    procedure AnswerPeer(E: Exception; const AId: TJRPCID);
     procedure FailInvalidResponse(AError: TJRPCError);
     procedure CompletePending(const AKey: string; AResponse: TJRPCResponse; AError: Exception);
     procedure FailPending(const AMessage: string);
@@ -760,20 +769,52 @@ var
   LMessage: TJRPCMessage;
   LId: TJRPCID;
   LRemote: EJRPCRemoteError;
+var
+  LParseError: EJRPCParseError;
 begin
+  // A blank frame (a stray line break between messages) carries nothing to
+  // read or to answer.
+  if AText.Trim = '' then
+    Exit;
+
   LDocument := TJSONObject.ParseJSONValue(AText);
   if not Assigned(LDocument) then
-    raise EJRPCParseError.Create(SJRPCInvalidJSONReceived);
+  begin
+    // What a server answers to what it cannot parse: -32700 with a null id.
+    // The peer may be waiting for it; the failure is still reported.
+    LParseError := EJRPCParseError.Create(SJRPCInvalidJSONReceived);
+    try
+      AnswerPeer(LParseError, nil);
+    except
+      LParseError.Free;
+      raise;
+    end;
+    raise LParseError;
+  end;
 
   try
-    LMessages := TJRPCMessages.CreateFromJson(LDocument);
+    try
+      LMessages := TJRPCMessages.CreateFromJson(LDocument);
+    except
+      on E: EJRPCException do
+      begin
+        // JSON, but no message at all - an empty array, a bare value: the
+        // -32600 a server owes it, with a null id. Then reported.
+        AnswerPeer(E, nil);
+        raise;
+      end;
+    end;
+
     try
       // One object per frame. A batch of one is still a batch: let through,
       // it would reach the object casts below, and an error reply inside it
       // would raise EInvalidCast instead of being reported.
       if not LMessages.Single or (LMessages.Count <> 1) then
+      begin
+        RejectPeerBatch(LMessages);
         raise EJRPCClientError.CreateFmt(SJRPCConnectionNotSingle,
           [LMessages.Count]);
+      end;
 
       LMessage := LMessages.List[0];
 
@@ -860,6 +901,51 @@ begin
   SendText(AError.ToJson);
 end;
 
+procedure TJRPCConnection.AnswerPeer(E: Exception; const AId: TJRPCID);
+var
+  LError: TJRPCError;
+begin
+  LError := TJRPCError.CreateFromException(E, AId);
+  try
+    SendText(LError.ToJson);
+  finally
+    LError.Free;
+  end;
+end;
+
+procedure TJRPCConnection.RejectPeerBatch(AMessages: TJRPCMessages);
+var
+  LIndex: Integer;
+  LMessage: TJRPCMessage;
+  LError: TJRPCError;
+  LReplies: TArray<string>;
+begin
+  // This endpoint does not fan a batch out, but a request inside one is still
+  // waiting for an answer: each gets a -32600 under its own id, together in
+  // an array as a batch reply must be. Notifications are never answered, and
+  // responses are reported with the batch by the caller.
+  LReplies := [];
+  for LIndex := 0 to AMessages.Count - 1 do
+  begin
+    LMessage := AMessages.List[LIndex];
+    if not (LMessage is TJRPCRequest) then
+      Continue;
+
+    LError := TJRPCError.Create;
+    try
+      LError.Id := (LMessage as TJRPCRequest).Id;
+      LError.Error.Code := JRPC_INVALID_REQUEST;
+      LError.Error.Message := SJRPCConnectionBatchRequest;
+      LReplies := LReplies + [LError.ToJson];
+    finally
+      LError.Free;
+    end;
+  end;
+
+  if Length(LReplies) > 0 then
+    SendText('[' + string.Join(',', LReplies) + ']');
+end;
+
 procedure TJRPCConnection.FailInvalidResponse(AError: TJRPCError);
 var
   LText: string;
@@ -890,7 +976,24 @@ var
 begin
   if Assigned(FOnRequest) then
   begin
-    FOnRequest(ARequest);
+    try
+      FOnRequest(ARequest);
+    except
+      on E: Exception do
+      begin
+        // The peer is waiting for this id. Answered the way TJRPCServer
+        // answers a method that raised: an EJRPCException with its own code,
+        // anything else as -32603 with the details logged rather than sent.
+        // Still raised, so the reader reports it to OnError.
+        try
+          AnswerPeer(E, ARequest.Id);
+        except
+          on ESend: Exception do
+            ReportError(ESend);
+        end;
+        raise;
+      end;
+    end;
     Exit;
   end;
 

@@ -90,6 +90,10 @@ type
     [Test] procedure TestRaisingOnErrorKeepsReaderAlive;
     [Test] procedure TestFreeAfterCloseFromHandlerWaitsForReader;
     [Test] procedure TestBatchOfOneFrameIsReported;
+    [Test] procedure TestRaisingRequestHandlerIsAnswered;
+    [Test] procedure TestUnparseableFrameIsAnswered;
+    [Test] procedure TestPeerBatchRequestsAreAnswered;
+    [Test] procedure TestBlankFrameIsIgnored;
   end;
 
 implementation
@@ -809,6 +813,178 @@ begin
   finally
     FConnection.OnError := nil;
     LReported.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestRaisingRequestHandlerIsAnswered;
+var
+  LAnswered: TEvent;
+  LReported: Integer;
+  LGeneric, LTyped: string;
+  LIndex: Integer;
+begin
+  // A handler that raises used to leave the peer waiting for an answer that
+  // never came. It is answered the way TJRPCServer answers a method that
+  // raised: a protocol exception keeps its code and message, anything else is
+  // -32603 with the details kept off the wire. Both are still reported.
+  LReported := 0;
+  LAnswered := TEvent.Create(nil, True, False, '');
+  try
+    FConnection.OnError :=
+      procedure(E: Exception)
+      begin
+        TInterlocked.Increment(LReported);
+      end;
+
+    FConnection.OnRequest :=
+      procedure(const ARequest: TJRPCRequest)
+      begin
+        if ARequest.Method = 'peer/typed' then
+          raise EJRPCInvalidParamsError.Create('the x argument is missing');
+        raise Exception.Create('secret internal detail');
+      end;
+
+    FTransport.OnSend :=
+      procedure(const AText: string)
+      begin
+        if FTransport.SentCount >= 2 then
+          LAnswered.SetEvent;
+      end;
+
+    FTransport.Push('{"jsonrpc":"2.0","id":"srv-5","method":"peer/generic"}');
+    FTransport.Push('{"jsonrpc":"2.0","id":"srv-6","method":"peer/typed"}');
+
+    Assert.IsTrue(LAnswered.WaitFor(3000) = wrSignaled, 'both requests must be answered');
+
+    LGeneric := '';
+    LTyped := '';
+    for LIndex := 0 to FTransport.SentCount - 1 do
+      if FTransport.SentText(LIndex).Contains('"srv-5"') then
+        LGeneric := FTransport.SentText(LIndex)
+      else if FTransport.SentText(LIndex).Contains('"srv-6"') then
+        LTyped := FTransport.SentText(LIndex);
+
+    Assert.IsTrue(LGeneric.Contains('-32603'), LGeneric);
+    Assert.IsFalse(LGeneric.Contains('secret internal detail'), LGeneric);
+    Assert.IsTrue(LTyped.Contains('-32602'), LTyped);
+    Assert.IsTrue(LTyped.Contains('the x argument is missing'), LTyped);
+
+    // The answer goes out before the failure is reported: let the second
+    // report land.
+    LIndex := 0;
+    while (LReported < 2) and (LIndex < 100) do
+    begin
+      Sleep(20);
+      Inc(LIndex);
+    end;
+    Assert.AreEqual(2, LReported, 'both failures are still reported');
+  finally
+    FConnection.OnError := nil;
+    FConnection.OnRequest := nil;
+    FTransport.OnSend := nil;
+    LAnswered.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestUnparseableFrameIsAnswered;
+var
+  LAnswered: TEvent;
+begin
+  LAnswered := TEvent.Create(nil, True, False, '');
+  try
+    FTransport.OnSend :=
+      procedure(const AText: string)
+      begin
+        LAnswered.SetEvent;
+      end;
+
+    FTransport.Push('{"jsonrpc":"2.0","id":1,"method":');
+
+    Assert.IsTrue(LAnswered.WaitFor(3000) = wrSignaled, 'a parse error must be answered');
+    Assert.IsTrue(FTransport.SentText(0).Contains('-32700'), FTransport.SentText(0));
+    Assert.IsTrue(FTransport.SentText(0).Contains('"id":null'), FTransport.SentText(0));
+  finally
+    FTransport.OnSend := nil;
+    LAnswered.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestPeerBatchRequestsAreAnswered;
+var
+  LAnswered: TEvent;
+  LHandled: Integer;
+  LReply: string;
+begin
+  // The connection does not fan a batch out, but the requests in it are
+  // waiting: each gets a -32600 under its own id, in one array. The
+  // notification in it gets nothing, and the handler sees none of them.
+  LHandled := 0;
+  LAnswered := TEvent.Create(nil, True, False, '');
+  try
+    FConnection.OnRequest :=
+      procedure(const ARequest: TJRPCRequest)
+      begin
+        TInterlocked.Increment(LHandled);
+      end;
+
+    FTransport.OnSend :=
+      procedure(const AText: string)
+      begin
+        LAnswered.SetEvent;
+      end;
+
+    FTransport.Push(
+      '[{"jsonrpc":"2.0","id":"a","method":"peer/one"},' +
+      '{"jsonrpc":"2.0","method":"peer/tell"},' +
+      '{"jsonrpc":"2.0","id":"b","method":"peer/two"}]');
+
+    Assert.IsTrue(LAnswered.WaitFor(3000) = wrSignaled, 'the batch must be answered');
+    Assert.AreEqual(1, FTransport.SentCount, 'one reply, an array');
+
+    LReply := FTransport.SentText(0);
+    Assert.IsTrue(LReply.StartsWith('['), LReply);
+    Assert.IsTrue(LReply.Contains('"id":"a"'), LReply);
+    Assert.IsTrue(LReply.Contains('"id":"b"'), LReply);
+    Assert.IsTrue(LReply.Contains('-32600'), LReply);
+    Assert.AreEqual(0, LHandled);
+  finally
+    FConnection.OnRequest := nil;
+    FTransport.OnSend := nil;
+    LAnswered.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestBlankFrameIsIgnored;
+var
+  LDelivered: TEvent;
+  LReported: Integer;
+begin
+  // A stray blank line is not a parse error to answer: nothing is sent and
+  // nothing reported. The notification after it is the sync point.
+  LReported := 0;
+  LDelivered := TEvent.Create(nil, True, False, '');
+  try
+    FConnection.OnError :=
+      procedure(E: Exception)
+      begin
+        TInterlocked.Increment(LReported);
+      end;
+    FConnection.OnNotification :=
+      procedure(const ANotification: TJRPCNotification)
+      begin
+        LDelivered.SetEvent;
+      end;
+
+    FTransport.Push('   ');
+    FTransport.Push('{"jsonrpc":"2.0","method":"peer/tell"}');
+
+    Assert.IsTrue(LDelivered.WaitFor(3000) = wrSignaled, 'the notification must arrive');
+    Assert.AreEqual(0, FTransport.SentCount);
+    Assert.AreEqual(0, LReported);
+  finally
+    FConnection.OnError := nil;
+    FConnection.OnNotification := nil;
+    LDelivered.Free;
   end;
 end;
 
