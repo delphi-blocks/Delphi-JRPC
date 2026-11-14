@@ -99,6 +99,11 @@ type
     [Test] procedure TestEmptyReplyRaises;
     [Test] procedure TestUnparsableReplyRaises;
     [Test] procedure TestBatchReplyToSingleRequestRaises;
+    [Test]
+    [TestCase('ErrorInside', '[{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"x"}}]|', '|')]
+    [TestCase('ResultInside', '[{"jsonrpc":"2.0","id":1,"result":1}]|', '|')]
+    [TestCase('NotAnObject', '[42]|', '|')]
+    procedure TestBatchOfOneReplyToSingleRequestRaises(const AReply, AUnused: string);
     [Test] procedure TestReplyWithResultAndErrorRaises;
 
     // OnError
@@ -131,6 +136,7 @@ type
     [Test] procedure TestStreamingUnexpectedRequestRaises;
     [Test] procedure TestStreamingBatchFrameRaises;
     [Test] procedure TestStreamingTraceSeesEachFrame;
+    [Test] procedure TestStreamingBatchOfOneErrorFrameRaises;
     [Test] procedure TestStreamingResultSurvivesFailureAfterIt;
     [Test] procedure TestStreamingErrorSurvivesFailureAfterIt;
     [Test] procedure TestStreamingFailureBeforeAnswerRaises;
@@ -147,7 +153,7 @@ implementation
 
 uses
   System.Classes, System.Rtti, System.Generics.Collections, System.Threading,
-  System.SyncObjs,
+  System.SyncObjs, System.StrUtils,
 
   Neon.Core.Persistence,
 
@@ -739,6 +745,35 @@ begin
     EJRPCClientError);
 end;
 
+procedure TJRPCClientTest.TestBatchOfOneReplyToSingleRequestRaises(const AReply,
+  AUnused: string);
+var
+  LError: TClass;
+  LMessage: string;
+begin
+  // A batch of one is still a batch, and a single request is answered by a
+  // single object. Read as one, an error inside raised EInvalidCast, a result
+  // was silently accepted, and "[42]" came back as a -32600 the peer never
+  // sent.
+  StubReply(AReply);
+
+  LError := nil;
+  try
+    FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('math/sum'));
+  except
+    on E: Exception do
+    begin
+      LError := E.ClassType;
+      LMessage := E.Message;
+    end;
+  end;
+
+  Assert.IsTrue(LError = EJRPCClientError,
+    Format('expected EJRPCClientError, got %s: %s',
+      [IfThen(Assigned(LError), LError.ClassName, 'no exception'), LMessage]));
+  Assert.IsTrue(LMessage.Contains('batch'), LMessage);
+end;
+
 procedure TJRPCClientTest.TestReplyWithResultAndErrorRaises;
 begin
   // Mutually exclusive per the spec; TJRPCMessages.GetMessageType rejects it.
@@ -1195,6 +1230,37 @@ begin
         Assert.AreEqual(1, (E.ErrorData as TJSONObject).GetValue<Integer>('detail'));
       end;
     end;
+  finally
+    FClient.Transport := nil;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamingBatchOfOneErrorFrameRaises;
+var
+  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+  LError: TClass;
+begin
+  LTransport := TFrameTransport.Create([
+    '[{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"bad args"}}]']);
+
+  FClient.Transport := LTransport;
+  FClient.OnTransport := nil;
+  try
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    LError := nil;
+    try
+      FClient.ExecuteAs<Integer>(LBuilder);
+    except
+      on E: Exception do
+        LError := E.ClassType;
+    end;
+
+    Assert.IsTrue(LError = EJRPCClientError,
+      'expected EJRPCClientError, got ' +
+      IfThen(Assigned(LError), LError.ClassName, 'no exception'));
   finally
     FClient.Transport := nil;
   end;

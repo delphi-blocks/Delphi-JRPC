@@ -89,6 +89,7 @@ type
     [Test] procedure TestMalformedNotificationIsReportedNotAnswered;
     [Test] procedure TestRaisingOnErrorKeepsReaderAlive;
     [Test] procedure TestFreeAfterCloseFromHandlerWaitsForReader;
+    [Test] procedure TestBatchOfOneFrameIsReported;
   end;
 
 implementation
@@ -777,6 +778,37 @@ begin
       'Destroy returned while the handler that closed the connection was still running');
   finally
     LInHandler.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestBatchOfOneFrameIsReported;
+var
+  LReported: TEvent;
+  LClass: string;
+  LMessage: string;
+begin
+  // An error reply wrapped in an array of one: read as a single message it
+  // reached the object cast and raised EInvalidCast. It is a batch, which this
+  // endpoint reports rather than fans out - and says so.
+  LReported := TEvent.Create(nil, True, False, '');
+  try
+    FConnection.OnError :=
+      procedure(E: Exception)
+      begin
+        LClass := E.ClassName;
+        LMessage := E.Message;
+        LReported.SetEvent;
+      end;
+
+    FTransport.Push('[{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"x"}}]');
+
+    Assert.IsTrue(LReported.WaitFor(3000) = wrSignaled, 'the frame must be reported');
+    Assert.AreEqual(EJRPCClientError.ClassName, LClass, LMessage);
+    Assert.IsTrue(LMessage.Contains('batch'), LMessage);
+    Assert.AreEqual(0, FTransport.SentCount, 'a reply is never answered');
+  finally
+    FConnection.OnError := nil;
+    LReported.Free;
   end;
 end;
 

@@ -731,7 +731,11 @@ begin
     // the version, rejects "result" and "error" together, and discriminates.
     LMessages := TJRPCMessages.CreateFromJson(LDocument);
     try
-      if LMessages.Count <> 1 then
+      // A single request is answered by a single object. A batch of one is
+      // still a batch: accepting it would also let "[42]" through as a -32600
+      // the peer never sent, and an error inside it would fail the object
+      // cast below.
+      if not LMessages.Single or (LMessages.Count <> 1) then
         raise EJRPCClientError.CreateFmt(SJRPCClientNotSingleReply, [LMessages.Count]);
 
       LMessage := LMessages.List[0];
@@ -862,7 +866,9 @@ begin
         try
           LMessages := TJRPCMessages.CreateFromJson(LDocument);
           try
-            if LMessages.Count <> 1 then
+            // One object per frame, as in ReadReply: a batch of one is
+            // still a batch.
+            if not LMessages.Single or (LMessages.Count <> 1) then
               raise EJRPCClientError.CreateFmt(SJRPCClientNotSingleReply,
                 [LMessages.Count]);
 

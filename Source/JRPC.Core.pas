@@ -82,7 +82,7 @@ resourcestring
   SJRPCClientEmptyReply = 'The peer answered nothing to a request that expects an answer';
   SJRPCClientIdMismatch = 'Reply id [%s] does not match request id [%s]: the connection is out of sync';
   SJRPCClientUnexpectedReply = 'The peer answered with a %s where a Response or an Error was expected';
-  SJRPCClientNotSingleReply = 'The peer answered with %d messages where exactly one was expected';
+  SJRPCClientNotSingleReply = 'The peer answered with a batch of %d message(s) where a single object was expected';
   SJRPCClientUnknownReplyId = 'The batch answer carries id [%s], which was never sent';
   SJRPCClientEmptyBatch = 'An empty batch has nothing to send';
   SJRPCClientMixedParams = 'A message carries either named or positional params, never both';
@@ -100,7 +100,7 @@ resourcestring
   SJRPCConnectionTimeout = 'The peer did not answer within %d ms';
   SJRPCConnectionCallCancelled = 'The call was cancelled';
   SJRPCConnectionNoResponse = 'The call completed without a response';
-  SJRPCConnectionNotSingle = 'The peer sent %d messages where exactly one was expected';
+  SJRPCConnectionNotSingle = 'The peer sent a batch of %d message(s) where a single object was expected';
   SJRPCConnectionUnknownId = 'The peer answered id [%s], which is not pending';
   SJRPCConnectionNullId = 'The peer sent an error with a null id: %s';
   SJRPCConnectionInvalidResponse = 'The peer sent a response that could not be read: %s';

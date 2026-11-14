@@ -768,7 +768,10 @@ begin
   try
     LMessages := TJRPCMessages.CreateFromJson(LDocument);
     try
-      if LMessages.Count <> 1 then
+      // One object per frame. A batch of one is still a batch: let through,
+      // it would reach the object casts below, and an error reply inside it
+      // would raise EInvalidCast instead of being reported.
+      if not LMessages.Single or (LMessages.Count <> 1) then
         raise EJRPCClientError.CreateFmt(SJRPCConnectionNotSingle,
           [LMessages.Count]);
 
