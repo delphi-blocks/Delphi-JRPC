@@ -105,6 +105,7 @@ resourcestring
   SJRPCConnectionNullId = 'The peer sent an error with a null id: %s';
   SJRPCConnectionInvalidResponse = 'The peer sent a response that could not be read: %s';
   SJRPCConnectionInvalidNotification = 'The peer sent a notification that could not be read: %s';
+  SJRPCConnectionDuplicateId = 'A call with id [%s] is already pending: the answer could not tell the two apart';
   SJRPCConnectionBatchRequest = 'This endpoint reads one message per frame: send the request on its own, not in a batch';
   SJRPCConnectionUnexpected = 'The peer sent a %s where a response, an error, a notification or a request was expected';
 

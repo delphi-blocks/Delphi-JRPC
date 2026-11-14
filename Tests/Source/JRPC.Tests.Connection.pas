@@ -94,12 +94,13 @@ type
     [Test] procedure TestUnparseableFrameIsAnswered;
     [Test] procedure TestPeerBatchRequestsAreAnswered;
     [Test] procedure TestBlankFrameIsIgnored;
+    [Test] procedure TestDuplicatePendingIdRaisesClientError;
   end;
 
 implementation
 
 uses
-  System.JSON, System.Threading;
+  System.JSON, System.Threading, System.StrUtils;
 
 { TMemoryMessageTransport }
 
@@ -985,6 +986,56 @@ begin
     FConnection.OnError := nil;
     FConnection.OnNotification := nil;
     LDelivered.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestDuplicatePendingIdRaisesClientError;
+var
+  LFirst, LSecond, LThird: TJRPCRequest;
+  LCall: IJRPCCall;
+  LError: TClass;
+  LMessage: string;
+begin
+  LFirst := NewRequest('math/slow');
+  LSecond := NewRequest('math/other');
+  LThird := NewRequest('math/third');
+  try
+    // No OnSend: the first call stays pending
+    LFirst.Id := 5;
+    LCall := FConnection.CallAsync(LFirst);
+
+    // The same id again used to raise EListError from the dictionary - not
+    // the EJRPCClientError the connection raises for every other refusal.
+    LSecond.Id := 5;
+    LError := nil;
+    try
+      FConnection.CallAsync(LSecond);
+    except
+      on E: Exception do
+      begin
+        LError := E.ClassType;
+        LMessage := E.Message;
+      end;
+    end;
+
+    Assert.IsTrue(LError = EJRPCClientError, 'expected EJRPCClientError, got ' +
+      IfThen(Assigned(LError), LError.ClassName + ': ' + LMessage, 'no exception'));
+    Assert.AreEqual(1, FTransport.SentCount, 'the refused call is never sent');
+
+    // The string "5" is a different id on the wire, so it is not a duplicate
+    LThird.Id := '5';
+    FConnection.CallAsync(LThird);
+    Assert.AreEqual(2, FTransport.SentCount);
+
+    // The first call is untouched and still gets its answer
+    Assert.IsFalse(LCall.Completed);
+    FTransport.Push('{"jsonrpc":"2.0","id":5,"result":1}');
+    Assert.IsTrue(LCall.Wait(2000), 'the pending call must still be answered');
+    Assert.IsNull(LCall.TakeError);
+  finally
+    LThird.Free;
+    LSecond.Free;
+    LFirst.Free;
   end;
 end;
 

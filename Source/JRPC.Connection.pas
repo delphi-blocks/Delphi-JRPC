@@ -259,6 +259,10 @@ type
     /// <summary>
     ///   Sends ARequest and returns a handle to wait on, without blocking.
     /// </summary>
+    /// <remarks>
+    ///   A request with no id is given one. An id that is already pending
+    ///   raises EJRPCClientError and sends nothing.
+    /// </remarks>
     function CallAsync(ARequest: TJRPCRequest): IJRPCCall;
 
     /// <summary>
@@ -682,6 +686,14 @@ begin
       raise EJRPCClientError.Create(SJRPCConnectionClosed);
     if not FOpen then
       raise EJRPCClientError.Create(SJRPCConnectionNotOpen);
+
+    // An id the caller chose (or a request object sent twice) that is still
+    // in flight: the answer could not tell the two calls apart. Refused before
+    // anything is sent, as the client error every other refusal here is -
+    // and the call already pending is left alone.
+    if FPending.ContainsKey(LCall.Key) then
+      raise EJRPCClientError.CreateFmt(SJRPCConnectionDuplicateId,
+        [ARequest.Id.AsString]);
 
     FPending.Add(LCall.Key, LOwned);
   finally
