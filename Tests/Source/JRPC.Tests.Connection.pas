@@ -87,6 +87,8 @@ type
     [Test] procedure TestMalformedPeerRequestIsAnsweredNotRouted;
     [Test] procedure TestMalformedResponseFailsCallLocally;
     [Test] procedure TestMalformedNotificationIsReportedNotAnswered;
+    [Test] procedure TestRaisingOnErrorKeepsReaderAlive;
+    [Test] procedure TestFreeAfterCloseFromHandlerWaitsForReader;
   end;
 
 implementation
@@ -703,6 +705,78 @@ begin
   finally
     FConnection.OnError := nil;
     LReported.Free;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestRaisingOnErrorKeepsReaderAlive;
+var
+  LRequest: TJRPCRequest;
+  LResponse: TJRPCResponse;
+begin
+  // OnError is called from the reader's own except blocks: an exception it
+  // raises used to escape the loop and end the reader silently, leaving every
+  // later call to wait for an answer nobody would read.
+  FConnection.OnError :=
+    procedure(E: Exception)
+    begin
+      raise Exception.Create('the handler failed too');
+    end;
+  try
+    FTransport.Push('this is not JSON');
+
+    FTransport.OnSend :=
+      procedure(const AText: string)
+      begin
+        FTransport.Push(EchoReply(AText));
+      end;
+
+    LRequest := NewRequest('math/sum');
+    try
+      LResponse := FConnection.Call(LRequest, 2000);
+      try
+        Assert.AreEqual(LRequest.Id.AsString, LResponse.Result.ToJSON);
+      finally
+        LResponse.Free;
+      end;
+    finally
+      LRequest.Free;
+    end;
+  finally
+    FConnection.OnError := nil;
+  end;
+end;
+
+procedure TJRPCConnectionTest.TestFreeAfterCloseFromHandlerWaitsForReader;
+var
+  LInHandler: TEvent;
+  LHandlerDone: Boolean;
+begin
+  // A handler closes the connection and goes on working; the owner sees it
+  // closed and frees it on its own thread. Destroy must wait for the handler
+  // to return and the reader to end, not free what the reader still uses.
+  LHandlerDone := False;
+  LInHandler := TEvent.Create(nil, True, False, '');
+  try
+    FConnection.OnRequest :=
+      procedure(const ARequest: TJRPCRequest)
+      begin
+        FConnection.Close;
+        LInHandler.SetEvent;
+        Sleep(300);
+        LHandlerDone := True;
+      end;
+
+    FTransport.Push('{"jsonrpc":"2.0","id":"srv-9","method":"peer/shutdown"}');
+    Assert.IsTrue(LInHandler.WaitFor(3000) = wrSignaled, 'the handler must run');
+    Assert.IsTrue(FConnection.Closed);
+
+    FConnection.Free;
+    FConnection := nil;
+
+    Assert.IsTrue(LHandlerDone,
+      'Destroy returned while the handler that closed the connection was still running');
+  finally
+    LInHandler.Free;
   end;
 end;
 

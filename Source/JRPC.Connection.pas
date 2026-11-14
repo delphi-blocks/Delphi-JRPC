@@ -199,6 +199,7 @@ type
     procedure FailInvalidResponse(AError: TJRPCError);
     procedure CompletePending(const AKey: string; AResponse: TJRPCResponse; AError: Exception);
     procedure FailPending(const AMessage: string);
+    procedure ReleaseReader;
     procedure Forget(const AKey: string);
     procedure NotifyClosed;
     procedure CloseTransport;
@@ -225,6 +226,12 @@ type
     ///   Ends the connection: pending calls fail with EJRPCClientError, the
     ///   transport is closed and the reader is joined. Idempotent.
     /// </summary>
+    /// <remarks>
+    ///   Called from a handler, it cannot join the thread it runs on: the
+    ///   reader ends once the handler returns, and the connection keeps it
+    ///   until Destroy, which waits for it. Freeing the connection on another
+    ///   thread right after such a Close is therefore safe.
+    /// </remarks>
     procedure Close;
 
     /// <summary>
@@ -276,6 +283,10 @@ type
     ///   A failure of the connection itself - an unreadable frame, a handler
     ///   that raised, an answer no call was waiting for.
     /// </summary>
+    /// <remarks>
+    ///   An exception this handler raises is logged and dropped: it cannot
+    ///   stop the reader or make Close and Destroy raise.
+    /// </remarks>
     property OnError: TJRPCConnectionErrorProc read FOnError write FOnError;
 
     /// <summary>
@@ -419,16 +430,20 @@ begin
 
   // The call is no longer pending; forget the connection under the same lock
   // Detach uses, so a close that already detached it is not called twice.
+  // Forget runs under that lock too: a Close racing with this one detaches
+  // the call before the connection is freed, and Detach waits here, so the
+  // connection cannot go away between reading it and calling it. The order
+  // is safe - the connection never holds its own lock while taking a call's.
   FLock.Enter;
   try
     LConnection := FConnection;
     FConnection := nil;
+
+    if Assigned(LConnection) then
+      LConnection.Forget(FKey);
   finally
     FLock.Leave;
   end;
-
-  if Assigned(LConnection) then
-    LConnection.Forget(FKey);
 end;
 
 function TJRPCConnectionCall.TakeResponse: TJRPCResponse;
@@ -488,6 +503,7 @@ end;
 destructor TJRPCConnection.Destroy;
 begin
   Close;
+  ReleaseReader;
   FPending.Free;
   FSendLock.Free;
   FLock.Free;
@@ -534,10 +550,16 @@ begin
     FOpen := False;
     FClosed := True;
 
-    // Take the reader reference once: the thread either joins here or frees
-    // itself, never both.
+    // Only a Close on another thread can join the reader; it takes the
+    // reference so that no second Close joins it again. A Close from a
+    // handler, on the reader itself, leaves it where it is: the connection
+    // still owns the thread, and Destroy joins it once the handler has
+    // returned and the loop has ended.
     LReader := FReader;
-    FReader := nil;
+    if Assigned(LReader) and (LReader <> TThread.CurrentThread) then
+      FReader := nil
+    else
+      LReader := nil;
   finally
     FLock.Leave;
   end;
@@ -569,16 +591,38 @@ begin
   if not Assigned(AReader) then
     Exit;
 
-  if AReader = TThread.CurrentThread then
+  AReader.WaitFor;
+  AReader.Free;
+end;
+
+procedure TJRPCConnection.ReleaseReader;
+var
+  LReader: TThread;
+begin
+  FLock.Enter;
+  try
+    LReader := FReader;
+    FReader := nil;
+  finally
+    FLock.Leave;
+  end;
+
+  if not Assigned(LReader) then
+    Exit;
+
+  if LReader = TThread.CurrentThread then
   begin
-    // Close called from a handler: the reader ends by itself once the handler
-    // returns, so let the thread object free itself.
-    AReader.FreeOnTerminate := True;
+    // Destroyed from a handler (OnClose, typically): the thread cannot wait
+    // for itself. It ends once the handler returns and frees itself; the
+    // handler must not touch the connection after freeing it, and the loop
+    // does not either once it has been closed.
+    LReader.FreeOnTerminate := True;
     Exit;
   end;
 
-  AReader.WaitFor;
-  AReader.Free;
+  // Still running only when Close came from a handler: wait for the handler
+  // to return and the loop to end, so nothing below frees what it uses.
+  FinalizeReader(LReader);
 end;
 
 function TJRPCConnection.Closed: Boolean;
@@ -957,8 +1001,18 @@ end;
 
 procedure TJRPCConnection.ReportError(E: Exception);
 begin
-  if Assigned(FOnError) then
+  if not Assigned(FOnError) then
+    Exit;
+
+  // Called from the reader's except blocks and from Close: a handler that
+  // raises must not end the reader (leaving every pending call waiting
+  // forever, and OnClose never fired) nor make a destructor raise.
+  try
     FOnError(E);
+  except
+    on EHandler: Exception do
+      Logger.LogWarning(EHandler, 'OnError raised while reporting: ' + E.Message);
+  end;
 end;
 
 class function TJRPCConnection.KeyOf(const AId: TJRPCID): string;
