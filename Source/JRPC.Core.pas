@@ -78,36 +78,34 @@ resourcestring
   SJRPCUnknownParamsType = 'Unknown params type';
 
   // JRPC.Client
-  SJRPCClientNoTransport = 'No transport: assign Transport or OnTransport before calling the peer';
-  SJRPCClientEmptyReply = 'The peer answered nothing to a request that expects an answer';
-  SJRPCClientIdMismatch = 'Reply id [%s] does not match request id [%s]: the connection is out of sync';
-  SJRPCClientUnexpectedReply = 'The peer answered with a %s where a Response or an Error was expected';
-  SJRPCClientNotSingleReply = 'The peer answered with a batch of %d message(s) where a single object was expected';
-  SJRPCClientUnknownReplyId = 'The batch answer carries id [%s], which was never sent';
+  SJRPCClientNoTransport = 'No transport: assign Transport before calling the peer';
   SJRPCClientEmptyBatch = 'An empty batch has nothing to send';
   SJRPCClientMixedParams = 'A message carries either named or positional params, never both';
   SJRPCClientUnknownResultType = 'Cannot deserialize the result: the requested type has no RTTI';
-  SJRPCClientStreamUnsupported = 'The assigned transport cannot stream: it does not implement IJRPCStreamingTransport';
-  SJRPCClientStreamEnded = 'The message stream ended before the response arrived';
-  SJRPCClientStreamUnexpectedRequest = 'The peer sent a request on a stream this client cannot answer';
+  SJRPCClientNoResponse = 'The exchange ended before the response arrived';
+  SJRPCClientClosed = 'The client is closed: %s';
+  SJRPCClientTimeout = 'The peer did not answer within %d ms';
+  SJRPCClientCallCancelled = 'The call was cancelled';
+  SJRPCClientOutcomeTaken = 'The failure of this call was already raised: %s';
+  SJRPCClientUnknownId = 'The peer answered id [%s], which is not pending';
+  SJRPCClientNullId = 'The peer sent an error with a null id: %s';
+  SJRPCClientInvalidResponse = 'The peer sent a response that could not be read: %s';
+  SJRPCClientInvalidNotification = 'The peer sent a notification that could not be read: %s';
+  SJRPCClientDuplicateId = 'A call with id [%s] is already pending: the answer could not tell the two apart';
+  SJRPCClientBatchRequest = 'Requests from the peer are served one per message, not inside a batch';
+  SJRPCClientUnexpected = 'The peer sent a %s where a response, an error, a notification or a request was expected';
+  SJRPCClientNoReply = 'The request handler returned without answering';
+  SJRPCClientAlreadyAnswered = 'The request [%s] was already answered';
 
-  // JRPC.Connection
-  SJRPCConnectionNoTransport = 'No transport: assign one before opening the connection';
-  SJRPCConnectionAlreadyOpen = 'The connection is already open';
-  SJRPCConnectionNotOpen = 'The connection is not open';
-  SJRPCConnectionClosed = 'The connection is closed';
-  SJRPCConnectionClosedByPeer = 'The peer closed the connection';
-  SJRPCConnectionTimeout = 'The peer did not answer within %d ms';
-  SJRPCConnectionCallCancelled = 'The call was cancelled';
-  SJRPCConnectionNoResponse = 'The call completed without a response';
-  SJRPCConnectionNotSingle = 'The peer sent a batch of %d message(s) where a single object was expected';
-  SJRPCConnectionUnknownId = 'The peer answered id [%s], which is not pending';
-  SJRPCConnectionNullId = 'The peer sent an error with a null id: %s';
-  SJRPCConnectionInvalidResponse = 'The peer sent a response that could not be read: %s';
-  SJRPCConnectionInvalidNotification = 'The peer sent a notification that could not be read: %s';
-  SJRPCConnectionDuplicateId = 'A call with id [%s] is already pending: the answer could not tell the two apart';
-  SJRPCConnectionBatchRequest = 'This endpoint reads one message per frame: send the request on its own, not in a batch';
-  SJRPCConnectionUnexpected = 'The peer sent a %s where a response, an error, a notification or a request was expected';
+  // JRPC.Transport
+  SJRPCCloseLocal = 'Closed locally';
+  SJRPCClosePeer = 'The peer closed the connection';
+  SJRPCCloseError = 'The transport failed: %s';
+  SJRPCTransportNotOpen = 'The transport is not open';
+  SJRPCTransportAlreadyOpen = 'The transport is already open';
+  SJRPCTransportClosed = 'The transport is closed and cannot be reopened';
+  SJRPCTransportNoFunc = 'TJRPCFuncTransport needs a function to send through';
+  SJRPCTransportNoServer = 'TJRPCLoopbackTransport needs a server';
 
 type
   /// <summary>
@@ -308,6 +306,11 @@ type
     ///   otherwise hand the peer the same id twice.
     /// </remarks>
     class function NewId: TJRPCID; static;
+
+    /// <summary>
+    ///   The null id: no id at all.
+    /// </summary>
+    class function Null: TJRPCID; static;
 
     /// <summary>
     ///   True when the id is absent (a Notification, or the null id of an error
@@ -1287,6 +1290,11 @@ end;
 class function TJRPCID.NewId: TJRPCID;
 begin
   Result := TInterlocked.Increment(JRPCIdSeed);
+end;
+
+class function TJRPCID.Null: TJRPCID;
+begin
+  Result.id := nil;
 end;
 
 { EJRPCRemoteError }

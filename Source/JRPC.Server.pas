@@ -14,13 +14,58 @@ unit JRPC.Server;
 interface
 
 uses
-  System.Classes, System.SysUtils, System.JSON, System.Contnrs,
+  System.Classes, System.SysUtils, System.JSON, System.Contnrs, System.SyncObjs,
 
   JRPC.Classes,
   JRPC.Core,
   JRPC.Invoker;
 
 type
+  /// <summary>
+  ///   Writes one message to the client the request being processed came
+  ///   from. Given by the transport to ProcessRequest.
+  /// </summary>
+  TJRPCNotifySink = reference to procedure(const AText: string);
+
+  /// <summary>
+  ///   Lets a method send notifications to its client while it is still
+  ///   running, ahead of its answer: progress, log lines, partial results.
+  /// </summary>
+  /// <remarks>
+  ///   The server puts one in the context of a request when the transport
+  ///   passed a sink to ProcessRequest or ProcessMessages, which only a
+  ///   transport with a channel back to the client can do (a socket, stdio).
+  ///   A method gets it through a [Context] field:
+  ///
+  ///   - [Context] FNotifier: TJRPCNotifier - the method needs it: without a
+  ///     sink the call fails before the method runs.
+  ///   - [Context([TContextOption.Optional])] FNotifier: TJRPCNotifier - the
+  ///     method can do without: the field is nil when there is no sink.
+  ///
+  ///   It lives as long as the request (the batch, for a batch): never keep it,
+  ///   nor use it from a thread that outlives the method. Send can be called
+  ///   from several threads at once while the method runs: calls are
+  ///   serialized, so the sink never runs twice at once.
+  /// </remarks>
+  TJRPCNotifier = class
+  private
+    FLock: TCriticalSection;
+    FSink: TJRPCNotifySink;
+  public
+    constructor Create(const ASink: TJRPCNotifySink);
+    destructor Destroy; override;
+
+    /// <summary>
+    ///   Sends ANotification now, before the answer. The caller still owns it.
+    /// </summary>
+    procedure Send(ANotification: TJRPCNotification); overload;
+
+    /// <summary>
+    ///   Sends a notification without params.
+    /// </summary>
+    procedure Send(const AMethod: string); overload;
+  end;
+
   /// <summary>
   ///   Standalone JSON-RPC 2.0 server.
   ///
@@ -49,13 +94,23 @@ type
     ///   array of Response objects, and a request that needs no answer
     ///   (notifications) yields an empty string.
     /// </summary>
-    function ProcessRequest(const AJSON: string): string;
+    /// <param name="ANotify">
+    ///   Where the notifications a method sends while it runs go (see
+    ///   TJRPCNotifier). Called before this function returns, on the thread of
+    ///   the method that sends. nil: the methods get no notifier.
+    /// </param>
+    function ProcessRequest(const AJSON: string;
+      const ANotify: TJRPCNotifySink = nil): string;
 
     /// <summary>
     ///   Dispatches an already parsed message list. Responses are appended to
     ///   AResponses, which must be owned by the caller.
     /// </summary>
-    procedure ProcessMessages(AMessages: TJRPCMessages; AResponses: TJRPCMessages);
+    /// <param name="ANotify">
+    ///   As in ProcessRequest.
+    /// </param>
+    procedure ProcessMessages(AMessages: TJRPCMessages; AResponses: TJRPCMessages;
+      const ANotify: TJRPCNotifySink = nil);
   end;
 
 implementation
@@ -67,6 +122,50 @@ uses
   Neon.Core.Utils,
 
   Logify;
+
+{ TJRPCNotifier }
+
+constructor TJRPCNotifier.Create(const ASink: TJRPCNotifySink);
+begin
+  inherited Create;
+  if not Assigned(ASink) then
+    raise EJRPCException.Create('TJRPCNotifier needs a sink to write to');
+
+  FLock := TCriticalSection.Create;
+  FSink := ASink;
+end;
+
+destructor TJRPCNotifier.Destroy;
+begin
+  FLock.Free;
+  inherited;
+end;
+
+procedure TJRPCNotifier.Send(ANotification: TJRPCNotification);
+var
+  LText: string;
+begin
+  LText := ANotification.ToJson;
+  FLock.Enter;
+  try
+    FSink(LText);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TJRPCNotifier.Send(const AMethod: string);
+var
+  LNotification: TJRPCNotification;
+begin
+  LNotification := TJRPCNotification.Create;
+  try
+    LNotification.Method := AMethod;
+    Send(LNotification);
+  finally
+    LNotification.Free;
+  end;
+end;
 
 { TJRPCServer }
 
@@ -130,11 +229,13 @@ begin
   end;
 end;
 
-procedure TJRPCServer.ProcessMessages(AMessages: TJRPCMessages; AResponses: TJRPCMessages);
+procedure TJRPCServer.ProcessMessages(AMessages: TJRPCMessages; AResponses: TJRPCMessages;
+  const ANotify: TJRPCNotifySink);
 var
   LContext: TJRPCContext;
   LGarbage: IGarbageCollector;
   LInstances: TObjectList;
+  LNotifier: TJRPCNotifier;
   LMessage: TJRPCMessage;
 begin
   // One context, one garbage collector and one instance list per batch: they
@@ -151,9 +252,18 @@ begin
   LContext := TJRPCContext.Create;
   LGarbage := TGarbageCollector.CreateInstance;
   LInstances := TObjectList.Create(True);
+  LNotifier := nil;
   try
     LContext.AddContent(LGarbage);
     LContext.AddContent(AResponses);
+
+    // Only with a channel back to the client: a [Context] field asking for it
+    // is otherwise left unresolved (an error, or nil when Optional).
+    if Assigned(ANotify) then
+    begin
+      LNotifier := TJRPCNotifier.Create(ANotify);
+      LContext.AddContent(LNotifier);
+    end;
 
     for LMessage in AMessages.List do
       DispatchMessage(LMessage, AResponses, LContext, LGarbage, LInstances);
@@ -166,10 +276,12 @@ begin
     // instances it was given - and the instances are not given to it.
     LInstances.Free;
     LContext.Free;
+    LNotifier.Free;
   end;
 end;
 
-function TJRPCServer.ProcessRequest(const AJSON: string): string;
+function TJRPCServer.ProcessRequest(const AJSON: string;
+  const ANotify: TJRPCNotifySink): string;
 var
   LRequestList: TJRPCMessages;
   LResponseList: TJRPCMessages;
@@ -201,7 +313,7 @@ begin
       Logger.LogDebug('[PERF] JRPC CreateFromJson: %d ms', [LFragment.ElapsedMilliseconds]);
 
       try
-        ProcessMessages(LRequestList, LResponseList);
+        ProcessMessages(LRequestList, LResponseList, ANotify);
         Result := LResponseList.ToJson;
       finally
         LRequestList.Free;

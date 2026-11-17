@@ -11,9 +11,11 @@
 {******************************************************************************}
 
 /// <summary>
-///   TJRPCClient, exercised against a real TJRPCServer wired straight into its
-///   OnTransport - an in-process loopback, so every test is a full round trip
-///   with no socket, no thread and no timing.
+///   TJRPCClient over a RoundTrip transport: a TJRPCFuncTransport wired
+///   straight into a real TJRPCServer, so every test is a full round trip
+///   with no socket. The streamed answers (an SSE body) and the asynchronous
+///   calls are exercised here too; the persistent channel lives in
+///   JRPC.Tests.Duplex.
 /// </summary>
 unit JRPC.Tests.Client;
 
@@ -25,6 +27,7 @@ uses
 
   JRPC.Core,
   JRPC.Server,
+  JRPC.Transport,
   JRPC.Client;
 
 type
@@ -44,21 +47,23 @@ type
     procedure StubReply(const AReply: string);
 
     /// <summary>
-    ///   Runs a stream whose callback captures the stream itself, and returns
-    ///   without clearing anything - the way a caller's method ends. A probe
-    ///   captured alongside sets AFreed when the callback's frame is released.
+    ///   Replaces the loopback with a transport that answers with AFrames, one
+    ///   message at a time, and then raises AFailure when one is given.
     /// </summary>
-    procedure RunSelfCapturingStream(AFreed: PBoolean);
+    procedure StubFrames(const AFrames: array of string; const AFailure: string = '');
+
+    /// <summary>
+    ///   Starts a call whose notification handler captures the call itself, and
+    ///   returns without clearing anything - the way a caller's method ends.
+    /// </summary>
+    procedure RunSelfCapturingCall(AFreed: PBoolean);
 
     /// <summary>
     ///   A bare Request, for the cases the builder cannot serve.
     /// </summary>
-    /// <remarks>
-    ///   TJRPCRequestBuilder owns what it builds, and TJRPCMessages takes
-    ///   ownership of what it is given: handing a built request to a batch
-    ///   would have the two free the same object.
-    /// </remarks>
     function NewRequest(const AMethod: string): TJRPCRequest;
+
+    class function IdOf(const AText: string): string; static;
   public
     [Setup] procedure Setup;
     [TearDown] procedure TearDown;
@@ -98,22 +103,27 @@ type
     // Malformed replies
     [Test] procedure TestEmptyReplyRaises;
     [Test] procedure TestUnparsableReplyRaises;
-    [Test] procedure TestBatchReplyToSingleRequestRaises;
+    [Test] procedure TestArrayReplyIsMatchedById;
     [Test]
-    [TestCase('ErrorInside', '[{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"x"}}]|', '|')]
+    [TestCase('ErrorInside', '[{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"x"}}]|EJRPCRemoteError', '|')]
     [TestCase('ResultInside', '[{"jsonrpc":"2.0","id":1,"result":1}]|', '|')]
-    [TestCase('NotAnObject', '[42]|', '|')]
-    procedure TestBatchOfOneReplyToSingleRequestRaises(const AReply, AUnused: string);
+    [TestCase('NotAnObject', '[42]|EJRPCClientError', '|')]
+    procedure TestArrayOfOneReply(const AReply, AExpected: string);
     [Test] procedure TestReplyWithResultAndErrorRaises;
 
     // OnError
     [Test] procedure TestOnErrorReportsAndStillRaises;
     [Test] procedure TestOnErrorReportsOncePerCall;
+    [Test] procedure TestOnErrorSeesAnAnswerNobodyWaitsFor;
+    [Test] procedure TestOnErrorAbortRaisesEAbort;
+    [Test] procedure TestOnErrorIgnoreReturnsAnEmptyResult;
+    [Test] procedure TestOnErrorIgnoreAppliesToValue;
+    [Test] procedure TestOnErrorIgnoreAppliesToAFailedStart;
+    [Test] procedure TestOnErrorThatRaisesStillRaisesTheFailure;
 
     // Notifications
     [Test] procedure TestNotificationIsNeverRead;
     [Test] procedure TestNotificationOverLoopback;
-    [Test] procedure TestNotificationBuilder;
     [Test] procedure TestExecuteTakesARequestBuilder;
 
     // Batches
@@ -126,25 +136,31 @@ type
     [Test] procedure TestNoTransportRaises;
     [Test] procedure TestTraceHooksSeeThePayloads;
     [Test] procedure TestExecuteDiscardsTheResult;
-    [Test] procedure TestExecuteRawIsUntouched;
+    [Test] procedure TestClosedClientRaisesUntilANewTransport;
 
-    // Streaming answers
-    [Test] procedure TestStreamingNotificationBeforeResponse;
-    [Test] procedure TestStreamingErrorFrameRaises;
-    [Test] procedure TestStreamingEndsWithoutResponseRaises;
-    [Test] procedure TestStreamingWrongIdRaises;
-    [Test] procedure TestStreamingUnexpectedRequestRaises;
-    [Test] procedure TestStreamingBatchFrameRaises;
-    [Test] procedure TestStreamingTraceSeesEachFrame;
-    [Test] procedure TestStreamingBatchOfOneErrorFrameRaises;
-    [Test] procedure TestStreamingResultSurvivesFailureAfterIt;
-    [Test] procedure TestStreamingErrorSurvivesFailureAfterIt;
-    [Test] procedure TestStreamingFailureBeforeAnswerRaises;
-    [Test] procedure TestExecuteStreamDeliversFrames;
-    [Test] procedure TestExecuteStreamCloseAborts;
-    [Test] procedure TestExecuteStreamWithoutStreamingTransportRaises;
-    [Test] procedure TestExecuteStreamReleasesSelfCapturingCallback;
-    [Test] procedure TestExecuteStreamClosedBeforeItStartsEnds;
+    // Streamed answers
+    [Test] procedure TestStreamNotificationGoesToItsCall;
+    [Test] procedure TestStreamNotificationWithoutHandlerGoesToOnNotification;
+    [Test] procedure TestStreamErrorFrameRaises;
+    [Test] procedure TestStreamArrayOfOneErrorFrameRaises;
+    [Test] procedure TestStreamResultSurvivesFailureAfterIt;
+    [Test] procedure TestStreamErrorSurvivesFailureAfterIt;
+    [Test] procedure TestStreamFailureBeforeAnswerRaises;
+    [Test] procedure TestStreamEndsWithoutResponseRaises;
+    [Test] procedure TestStreamWrongIdRaises;
+    [Test] procedure TestStreamPeerRequestIsAnswered;
+    [Test] procedure TestStreamArrayFrameIsMatchedById;
+    [Test] procedure TestStreamTraceSeesEachFrame;
+
+    // Asynchronous calls
+    [Test] procedure TestExecuteAsyncValue;
+    [Test] procedure TestExecuteAsyncRemoteError;
+    [Test] procedure TestExecuteAsyncCallsOverlap;
+    [Test] procedure TestExecuteAsyncFailureRaisedOnceThenQuoted;
+    [Test] procedure TestExecuteAsyncDeliversItsNotifications;
+    [Test] procedure TestCancelAbortsTheRead;
+    [Test] procedure TestCancelledBeforeItStartsNeverSends;
+    [Test] procedure TestReleasesSelfCapturingHandler;
 
     // Configuration
     [Test] procedure TestNeonConfigIsHonoured;
@@ -154,59 +170,13 @@ implementation
 
 uses
   System.Classes, System.Rtti, System.Generics.Collections, System.Threading,
-  System.SyncObjs, System.StrUtils,
+  System.SyncObjs, System.StrUtils, System.Diagnostics,
 
   Neon.Core.Persistence,
 
   JRPC.Tests.Api;
 
 type
-  /// <summary>
-  ///   A transport that answers with a fixed sequence of JSON-RPC messages, so
-  ///   the streamed cases can be exercised without a socket.
-  /// </summary>
-  TFrameTransport = class(TInterfacedObject, IJRPCClientTransport,
-    IJRPCStreamingTransport, IJRPCAbortableTransport)
-  private
-    FFrames: TArray<string>;
-    FAborted: Integer;
-    FFailure: string;
-  public
-    constructor Create(const AFrames: array of string);
-
-    /// <summary>
-    ///   When set, the read ends by raising this - after the callback stopped
-    ///   it, or after the last frame - the way a transport that fails while
-    ///   winding down does.
-    /// </summary>
-    property Failure: string read FFailure write FFailure;
-
-    function SendAndReceive(const ARequest: string): string;
-    procedure Send(const ARequest: string);
-    procedure SendAndReceiveFrames(const ARequest: string;
-      const AOnFrame: TJRPCFrameProc);
-    procedure Abort;
-  end;
-
-  /// <summary>
-  ///   Delivers one frame and then blocks until Abort, so that Close can be
-  ///   observed unblocking a read rather than waiting for the peer.
-  /// </summary>
-  TBlockingFrameTransport = class(TInterfacedObject, IJRPCClientTransport,
-    IJRPCStreamingTransport, IJRPCAbortableTransport)
-  private
-    FRelease: TEvent;
-  public
-    constructor Create;
-    destructor Destroy; override;
-
-    function SendAndReceive(const ARequest: string): string;
-    procedure Send(const ARequest: string);
-    procedure SendAndReceiveFrames(const ARequest: string;
-      const AOnFrame: TJRPCFrameProc);
-    procedure Abort;
-  end;
-
   /// <summary>
   ///   A type whose member is snake_case on the wire, for the NeonConfig test.
   ///   A property rather than a field: the default Neon configuration reads
@@ -220,29 +190,37 @@ type
   end;
 
   /// <summary>
-  ///   A silent peer behind a transport that clears its abort state as each
-  ///   call starts - the way a reusable transport does, so that an Abort only
-  ///   speaks for the call in progress. The read then waits for Abort, or
-  ///   gives up after 3 s.
+  ///   A RoundTrip transport whose answer is a long-lived stream: one
+  ///   notification, then a read that only Abort ends - the shape of a
+  ///   subscription. It clears its abort state as each Send starts, the way a
+  ///   reusable transport does, and gives up after 3 s.
   /// </summary>
-  TResettingSilentTransport = class(TInterfacedObject, IJRPCClientTransport,
-    IJRPCStreamingTransport, IJRPCAbortableTransport)
+  TListenTransport = class(TInterfacedObject, IJRPCTransport, IJRPCAbortableTransport)
   private
+    FListener: IJRPCTransportListener;
     FAborted: Integer;
-    FCalls: Integer;
+    FSends: Integer;
+    FAborts: Integer;
+    FSilent: Boolean;
   public
-    function SendAndReceive(const ARequest: string): string;
-    procedure Send(const ARequest: string);
-    procedure SendAndReceiveFrames(const ARequest: string;
-      const AOnFrame: TJRPCFrameProc);
-    procedure Abort;
+    constructor Create(ASilent: Boolean);
 
-    property Calls: Integer read FCalls;
+    // IJRPCTransport
+    procedure Open(const AListener: IJRPCTransportListener);
+    procedure Send(const AText: string; const AOrigin: TJRPCID);
+    procedure Close;
+    function RoundTrip: Boolean;
+
+    // IJRPCAbortableTransport
+    procedure Abort(const AOrigin: TJRPCID);
+
+    property Sends: Integer read FSends;
+    property Aborts: Integer read FAborts;
   end;
 
   /// <summary>
-  ///   Sets a flag when it is freed: captured by a callback, it tells when the
-  ///   callback's closure frame goes.
+  ///   Sets a flag when it is freed: captured by a handler, it tells when the
+  ///   handler's closure frame goes.
   /// </summary>
   TReleaseProbe = class(TInterfacedObject)
   private
@@ -252,26 +230,30 @@ type
     destructor Destroy; override;
   end;
 
-{ TResettingSilentTransport }
+{ TListenTransport }
 
-function TResettingSilentTransport.SendAndReceive(const ARequest: string): string;
+constructor TListenTransport.Create(ASilent: Boolean);
 begin
-  Result := '';
+  inherited Create;
+  FSilent := ASilent;
 end;
 
-procedure TResettingSilentTransport.Send(const ARequest: string);
+procedure TListenTransport.Open(const AListener: IJRPCTransportListener);
 begin
+  FListener := AListener;
 end;
 
-procedure TResettingSilentTransport.SendAndReceiveFrames(const ARequest: string;
-  const AOnFrame: TJRPCFrameProc);
+procedure TListenTransport.Send(const AText: string; const AOrigin: TJRPCID);
 var
   LWaited: Integer;
 begin
-  TInterlocked.Increment(FCalls);
+  TInterlocked.Increment(FSends);
 
-  // A new call starts clean: an Abort that came before it is forgotten
+  // A new read starts clean: an Abort that came before it is forgotten
   TInterlocked.Exchange(FAborted, 0);
+
+  if not FSilent then
+    FListener.MessageReceived('{"jsonrpc":"2.0","method":"notifications/first"}', AOrigin);
 
   LWaited := 0;
   while (TInterlocked.CompareExchange(FAborted, 0, 0) = 0) and (LWaited < 3000) do
@@ -281,8 +263,22 @@ begin
   end;
 end;
 
-procedure TResettingSilentTransport.Abort;
+procedure TListenTransport.Close;
 begin
+  TInterlocked.Exchange(FAborted, 1);
+  if Assigned(FListener) then
+    FListener.TransportClosed(TJRPCCloseInfo.Local);
+  FListener := nil;
+end;
+
+function TListenTransport.RoundTrip: Boolean;
+begin
+  Result := True;
+end;
+
+procedure TListenTransport.Abort(const AOrigin: TJRPCID);
+begin
+  TInterlocked.Increment(FAborts);
   TInterlocked.Exchange(FAborted, 1);
 end;
 
@@ -300,87 +296,6 @@ begin
   inherited;
 end;
 
-{ TFrameTransport }
-
-constructor TFrameTransport.Create(const AFrames: array of string);
-var
-  LIndex: Integer;
-begin
-  inherited Create;
-  SetLength(FFrames, Length(AFrames));
-  for LIndex := 0 to High(AFrames) do
-    FFrames[LIndex] := AFrames[LIndex];
-end;
-
-function TFrameTransport.SendAndReceive(const ARequest: string): string;
-begin
-  // The streaming interface is what the client uses; this is only here because
-  // IJRPCStreamingTransport descends from it.
-  Result := '';
-end;
-
-procedure TFrameTransport.Send(const ARequest: string);
-begin
-end;
-
-procedure TFrameTransport.SendAndReceiveFrames(const ARequest: string;
-  const AOnFrame: TJRPCFrameProc);
-var
-  LFrame: string;
-begin
-  for LFrame in FFrames do
-  begin
-    if FAborted <> 0 then
-      Exit;
-    if not AOnFrame(LFrame) then
-      Break;
-  end;
-
-  if FFailure <> '' then
-    raise Exception.Create(FFailure);
-end;
-
-procedure TFrameTransport.Abort;
-begin
-  TInterlocked.Exchange(FAborted, 1);
-end;
-
-{ TBlockingFrameTransport }
-
-constructor TBlockingFrameTransport.Create;
-begin
-  inherited Create;
-  FRelease := TEvent.Create(nil, True, False, '');
-end;
-
-destructor TBlockingFrameTransport.Destroy;
-begin
-  FRelease.Free;
-  inherited;
-end;
-
-function TBlockingFrameTransport.SendAndReceive(const ARequest: string): string;
-begin
-  Result := '';
-end;
-
-procedure TBlockingFrameTransport.Send(const ARequest: string);
-begin
-end;
-
-procedure TBlockingFrameTransport.SendAndReceiveFrames(const ARequest: string;
-  const AOnFrame: TJRPCFrameProc);
-begin
-  AOnFrame('{"jsonrpc":"2.0","method":"notifications/first"}');
-  // A read that only the Abort can end - the shape of a long-lived stream.
-  FRelease.WaitFor(5000);
-end;
-
-procedure TBlockingFrameTransport.Abort;
-begin
-  FRelease.SetEvent;
-end;
-
 { TJRPCClientTest }
 
 procedure TJRPCClientTest.Setup;
@@ -390,12 +305,12 @@ begin
   FClient := TJRPCClient.Create(nil);
 
   // The whole trick: the server *is* the transport.
-  FClient.OnTransport :=
-    function(const ARequest: string): string
+  FClient.Transport := TJRPCFuncTransport.Create(
+    function (const AText: string): string
     begin
-      FSent := ARequest;
-      Result := FServer.ProcessRequest(ARequest);
-    end;
+      FSent := AText;
+      Result := FServer.ProcessRequest(AText);
+    end);
 end;
 
 procedure TJRPCClientTest.TearDown;
@@ -406,18 +321,53 @@ end;
 
 procedure TJRPCClientTest.StubReply(const AReply: string);
 begin
-  FClient.OnTransport :=
-    function(const ARequest: string): string
+  FClient.Transport := TJRPCFuncTransport.Create(
+    function (const AText: string): string
     begin
-      FSent := ARequest;
+      FSent := AText;
       Result := AReply;
-    end;
+    end);
+end;
+
+procedure TJRPCClientTest.StubFrames(const AFrames: array of string;
+  const AFailure: string);
+var
+  LFrames: TArray<string>;
+  LIndex: Integer;
+begin
+  SetLength(LFrames, Length(AFrames));
+  for LIndex := 0 to High(AFrames) do
+    LFrames[LIndex] := AFrames[LIndex];
+
+  FClient.Transport := TJRPCFuncTransport.CreateFramed(
+    procedure (const AText: string; const AOnFrame: TJRPCFrameSink)
+    var
+      LFrame: string;
+    begin
+      FSent := AText;
+      for LFrame in LFrames do
+        AOnFrame(LFrame);
+      if AFailure <> '' then
+        raise Exception.Create(AFailure);
+    end);
 end;
 
 function TJRPCClientTest.NewRequest(const AMethod: string): TJRPCRequest;
 begin
   Result := TJRPCRequest.Create;
   Result.Method := AMethod;
+end;
+
+class function TJRPCClientTest.IdOf(const AText: string): string;
+var
+  LValue: TJSONValue;
+begin
+  LValue := TJSONObject.ParseJSONValue(AText);
+  try
+    Result := (LValue as TJSONObject).GetValue('id').ToJSON;
+  finally
+    LValue.Free;
+  end;
 end;
 
 procedure TJRPCClientTest.TestExecuteAsInteger;
@@ -444,7 +394,7 @@ var
 begin
   // The instance-type branch: Neon creates it, the caller owns it. "camel/" and
   // not "object/" because the client deserializes with JRPCNeonConfig, which is
-  // CamelCase: the PascalCase API would be testing a casing mismatch instead.
+  // CamelCase.
   LPerson := FClient.ExecuteAs<TPerson>(TJRPCRequestBuilder.New.SetMethod('camel/person'));
   try
     Assert.IsNotNull(LPerson);
@@ -469,8 +419,7 @@ var
   LValue: TJSONValue;
 begin
   // "math/reset" is a procedure, so the Response carries "result": null. It must
-  // arrive as a live TJSONNull, not as nil: "nothing" and "no answer" are
-  // different things.
+  // arrive as a live TJSONNull, not as nil.
   LValue := FClient.ExecuteAsJSONValue(TJRPCRequestBuilder.New.SetMethod('math/reset'));
   try
     Assert.IsNotNull(LValue);
@@ -517,15 +466,12 @@ procedure TJRPCClientTest.TestBuilderNoParamsOmitsTheMember;
 begin
   FClient.ExecuteAs<string>(TJRPCRequestBuilder.New.SetMethod('ping'));
 
-  // JSON-RPC 2.0 wants the member absent, not null: a strict peer answers
-  // -32602 to "params": null.
+  // JSON-RPC 2.0 wants the member absent, not null.
   Assert.IsFalse(FSent.Contains('"params"'), 'no params member expected: ' + FSent);
 end;
 
 procedure TJRPCClientTest.TestBuilderMixedParamsRaise;
 begin
-  // JSON-RPC 2.0 has no shape for a message carrying both: "params" is either
-  // an Array or an Object.
   Assert.WillRaise(
     procedure
     begin
@@ -551,8 +497,6 @@ procedure TJRPCClientTest.TestBuilderAcceptedDirectly;
 var
   LBuilder: IJRPCRequestBuilder;
 begin
-  // Build only lends the request out - the builder frees it - so the two ways
-  // in must agree, and neither may leak.
   LBuilder := TJRPCRequestBuilder.New
     .SetMethod('math/sum')
     .AddNamedParam('a', 20)
@@ -591,13 +535,11 @@ var
   LSeen: TList<Integer>;
   LLock: TCriticalSection;
 begin
-  // The interlocked counter is the only thing standing between two threads and
-  // a duplicate id on the wire.
   LSeen := TList<Integer>.Create;
   LLock := TCriticalSection.Create;
   try
     TParallel.For(1, THREAD_COUNT,
-      procedure(AIndex: Integer)
+      procedure (AIndex: Integer)
       var
         LLocal: TArray<Integer>;
         LStep: Integer;
@@ -628,8 +570,8 @@ end;
 
 procedure TJRPCClientTest.TestIdMismatchIsDetected;
 begin
-  // The desync a hand-written client never notices: the answer to the previous
-  // call, returned as if it were this one.
+  // The answer to another call, returned as if it were this one: it matches no
+  // pending call, so this one ends without an answer.
   StubReply('{"jsonrpc":"2.0","id":999,"result":42}');
 
   Assert.WillRaise(
@@ -644,8 +586,7 @@ procedure TJRPCClientTest.TestStringIdAnsweredWithNumberIsDetected;
 var
   LRequest: TJRPCRequest;
 begin
-  // The string "7" and the number 7 are different ids: AsString alone cannot
-  // tell them apart, which is why SameId compares the kind first.
+  // The string "7" and the number 7 are different ids.
   StubReply('{"jsonrpc":"2.0","id":7,"result":42}');
 
   LRequest := NewRequest('math/sum');
@@ -663,6 +604,45 @@ begin
   end;
 end;
 
+procedure TJRPCClientTest.TestIdEquality;
+var
+  LFirst, LSecond, LAbsent, LDefaultAbsent: TJRPCID;
+begin
+  LFirst := 7;
+  LSecond := 7;
+  LAbsent := nil;
+
+  Assert.IsTrue(LFirst = LSecond, 'the same number is the same id');
+  Assert.IsFalse(LFirst = LAbsent, 'an id is not the absent id');
+  Assert.IsTrue(LAbsent = LDefaultAbsent, 'two absent ids are equal');
+  Assert.IsTrue(LAbsent = TJRPCID.Null, 'TJRPCID.Null is the absent id');
+end;
+
+procedure TJRPCClientTest.TestIdInequalityAcrossKinds;
+var
+  LNumber, LText: TJRPCID;
+begin
+  LNumber := 7;
+  LText := '7';
+
+  // AsString would render both as '7': the kind is part of the identity.
+  Assert.IsFalse(LNumber = LText);
+  Assert.IsTrue(LNumber <> LText);
+end;
+
+procedure TJRPCClientTest.TestIdEqualityIsNotTruncated;
+var
+  LLarge, LLargeAgain, LZero: TJRPCID;
+begin
+  // 2^32: AsInteger would truncate it to 0 and make it equal to the id 0.
+  LLarge := Int64(4294967296);
+  LLargeAgain := Int64(4294967296);
+  LZero := 0;
+
+  Assert.IsFalse(LLarge = LZero);
+  Assert.IsTrue(LLarge = LLargeAgain);
+end;
+
 procedure TJRPCClientTest.TestMethodNotFoundRaisesRemoteError;
 begin
   try
@@ -677,7 +657,6 @@ end;
 procedure TJRPCClientTest.TestInvalidParamsRaisesRemoteError;
 begin
   try
-    // "a" is an Integer: a string is -32602.
     FClient.ExecuteAs<Integer>(
       TJRPCRequestBuilder.New
         .SetMethod('math/sum')
@@ -697,14 +676,12 @@ procedure TJRPCClientTest.TestRemoteErrorKeepsStructuredData;
 var
   LRequest: TJRPCRequest;
 begin
-  // The regression that matters: TJValueSerializer maps only numbers, strings
-  // and booleans into TJRPCErrorDetails.Data, so an object payload arrives
-  // empty there. It has to be lifted out of the raw document instead.
+  // TJValueSerializer maps only numbers, strings and booleans into
+  // TJRPCErrorDetails.Data, so an object payload has to be lifted out of the
+  // raw document instead.
   StubReply('{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"nope",' +
     '"data":{"retryAfter":30,"reason":"busy"}}}');
 
-  // An explicit id, because a canned reply cannot echo the generated one - and
-  // the client would rightly call that a desync.
   LRequest := NewRequest('math/sum');
   try
     LRequest.Id := 1;
@@ -730,8 +707,6 @@ procedure TJRPCClientTest.TestRemoteErrorKeepsCodeZero;
 var
   LRequest: TJRPCRequest;
 begin
-  // EJRPCException.AfterConstruction stamps -32603 over a zero code; a peer may
-  // legitimately answer 0, so the wire value has to be put back.
   StubReply('{"jsonrpc":"2.0","id":1,"error":{"code":0,"message":"zero"}}');
 
   LRequest := NewRequest('math/sum');
@@ -752,8 +727,8 @@ end;
 
 procedure TJRPCClientTest.TestRemoteErrorWithNullIdIsAccepted;
 begin
-  // A null id is what a peer answers when it could not read ours: that is not
-  // a desync, it is the documented shape of a parse error.
+  // A null id is what a peer answers when it could not read ours. On the
+  // answer stream of a call, it is that call's answer.
   StubReply('{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse"}}');
 
   try
@@ -789,50 +764,57 @@ begin
     EJRPCParseError);
 end;
 
-procedure TJRPCClientTest.TestBatchReplyToSingleRequestRaises;
+procedure TJRPCClientTest.TestArrayReplyIsMatchedById;
+var
+  LRequest: TJRPCRequest;
 begin
-  StubReply('[{"jsonrpc":"2.0","id":1,"result":1},{"jsonrpc":"2.0","id":2,"result":2}]');
+  // An array is matched element by element: the element carrying our id is
+  // our answer, the other one belongs to nobody.
+  StubReply('[{"jsonrpc":"2.0","id":2,"result":2},{"jsonrpc":"2.0","id":1,"result":5}]');
 
-  Assert.WillRaise(
-    procedure
-    begin
-      FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('math/sum'));
-    end,
-    EJRPCClientError);
+  LRequest := NewRequest('math/sum');
+  try
+    LRequest.Id := 1;
+    Assert.AreEqual(5, FClient.ExecuteAs<Integer>(LRequest));
+  finally
+    LRequest.Free;
+  end;
 end;
 
-procedure TJRPCClientTest.TestBatchOfOneReplyToSingleRequestRaises(const AReply,
-  AUnused: string);
+procedure TJRPCClientTest.TestArrayOfOneReply(const AReply, AExpected: string);
 var
-  LError: TClass;
+  LRequest: TJRPCRequest;
+  LError: string;
   LMessage: string;
 begin
-  // A batch of one is still a batch, and a single request is answered by a
-  // single object. Read as one, an error inside raised EInvalidCast, a result
-  // was silently accepted, and "[42]" came back as a -32600 the peer never
-  // sent.
+  // An array of one is read element by element like any other: an error
+  // inside raised EInvalidCast once, and "[42]" must not become a -32600 the
+  // peer never sent.
   StubReply(AReply);
 
-  LError := nil;
+  LRequest := NewRequest('math/sum');
   try
-    FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('math/sum'));
-  except
-    on E: Exception do
-    begin
-      LError := E.ClassType;
-      LMessage := E.Message;
+    LRequest.Id := 1;
+    LError := '';
+    try
+      FClient.ExecuteAs<Integer>(LRequest);
+    except
+      on E: Exception do
+      begin
+        LError := E.ClassName;
+        LMessage := E.Message;
+      end;
     end;
+  finally
+    LRequest.Free;
   end;
 
-  Assert.IsTrue(LError = EJRPCClientError,
-    Format('expected EJRPCClientError, got %s: %s',
-      [IfThen(Assigned(LError), LError.ClassName, 'no exception'), LMessage]));
-  Assert.IsTrue(LMessage.Contains('batch'), LMessage);
+  Assert.AreEqual(AExpected, LError, LMessage);
 end;
 
 procedure TJRPCClientTest.TestReplyWithResultAndErrorRaises;
 begin
-  // Mutually exclusive per the spec; TJRPCMessages.GetMessageType rejects it.
+  // Mutually exclusive per the spec; the call fails as a client error.
   StubReply('{"jsonrpc":"2.0","id":1,"result":1,"error":{"code":-1,"message":"x"}}');
 
   Assert.WillRaise(
@@ -848,13 +830,11 @@ var
 begin
   LSeen := '';
   FClient.OnError :=
-    procedure(E: Exception)
+    procedure (E: Exception; var AAction: TJRPCErrorAction)
     begin
       LSeen := E.Message;
     end;
 
-  // OnError observes, it does not handle: assigning it must not change the
-  // flow of a failed call.
   Assert.WillRaise(
     procedure
     begin
@@ -871,13 +851,11 @@ var
 begin
   LCount := 0;
   FClient.OnError :=
-    procedure(E: Exception)
+    procedure (E: Exception; var AAction: TJRPCErrorAction)
     begin
       Inc(LCount);
     end;
 
-  // ExecuteAs goes through the private round trip rather than through
-  // ExecuteAsJSONValue, so one failed call is one report - not one per layer.
   try
     FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('no/such/method'));
   except
@@ -888,37 +866,148 @@ begin
   Assert.AreEqual(1, LCount);
 end;
 
+procedure TJRPCClientTest.TestOnErrorSeesAnAnswerNobodyWaitsFor;
+var
+  LSeen: TStringList;
+begin
+  LSeen := TStringList.Create;
+  try
+    FClient.OnError :=
+      procedure (E: Exception; var AAction: TJRPCErrorAction)
+      begin
+        LSeen.Add(E.Message);
+      end;
+
+    StubReply('{"jsonrpc":"2.0","id":999,"result":42}');
+    try
+      FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('math/sum'));
+    except
+      on E: EJRPCClientError do
+        ; // expected
+    end;
+
+    // The stray answer, then the call that got none.
+    Assert.AreEqual(2, LSeen.Count, LSeen.Text);
+    Assert.IsTrue(LSeen[0].Contains('999'), LSeen[0]);
+  finally
+    FClient.OnError := nil;
+    LSeen.Free;
+  end;
+end;
+
+procedure TJRPCClientTest.TestOnErrorAbortRaisesEAbort;
+begin
+  FClient.OnError :=
+    procedure (E: Exception; var AAction: TJRPCErrorAction)
+    begin
+      AAction := TJRPCErrorAction.Abort;
+    end;
+
+  Assert.WillRaise(
+    procedure
+    begin
+      FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('no/such/method'));
+    end,
+    EAbort);
+end;
+
+procedure TJRPCClientTest.TestOnErrorIgnoreReturnsAnEmptyResult;
+var
+  LValue: TJSONValue;
+begin
+  FClient.OnError :=
+    procedure (E: Exception; var AAction: TJRPCErrorAction)
+    begin
+      AAction := TJRPCErrorAction.Ignore;
+    end;
+
+  Assert.AreEqual(0, FClient.ExecuteAs<Integer>(
+    TJRPCRequestBuilder.New.SetMethod('no/such/method')));
+  Assert.AreEqual('', FClient.ExecuteAsJsonString(
+    TJRPCRequestBuilder.New.SetMethod('no/such/method')));
+  FClient.Execute(TJRPCRequestBuilder.New.SetMethod('no/such/method'));
+
+  LValue := FClient.ExecuteAsJSONValue(TJRPCRequestBuilder.New.SetMethod('no/such/method'));
+  Assert.IsNull(LValue);
+end;
+
+procedure TJRPCClientTest.TestOnErrorIgnoreAppliesToValue;
+var
+  LCall: IJRPCCall<Integer>;
+begin
+  FClient.OnError :=
+    procedure (E: Exception; var AAction: TJRPCErrorAction)
+    begin
+      AAction := TJRPCErrorAction.Ignore;
+    end;
+
+  LCall := FClient.ExecuteAsync<Integer>(TJRPCRequestBuilder.New.SetMethod('no/such/method'));
+  Assert.AreEqual(0, LCall.Value);
+  // The choice sticks: a second read does not raise either.
+  Assert.AreEqual(0, LCall.Value);
+end;
+
+procedure TJRPCClientTest.TestOnErrorIgnoreAppliesToAFailedStart;
+var
+  LCall: IJRPCCall<Integer>;
+begin
+  FClient.OnError :=
+    procedure (E: Exception; var AAction: TJRPCErrorAction)
+    begin
+      AAction := TJRPCErrorAction.Ignore;
+    end;
+  // No transport: the call fails before anything is sent.
+  FClient.Transport := nil;
+
+  Assert.AreEqual(0, FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('math/sum')));
+
+  LCall := FClient.ExecuteAsync<Integer>(TJRPCRequestBuilder.New.SetMethod('math/sum'));
+  Assert.IsTrue(LCall.Completed);
+  Assert.AreEqual(0, LCall.Value);
+
+  FClient.Notify(TJRPCNotificationBuilder.New.SetMethod('log'));
+end;
+
+procedure TJRPCClientTest.TestOnErrorThatRaisesStillRaisesTheFailure;
+begin
+  FClient.OnError :=
+    procedure (E: Exception; var AAction: TJRPCErrorAction)
+    begin
+      AAction := TJRPCErrorAction.Ignore;
+      raise Exception.Create('the handler failed');
+    end;
+
+  Assert.WillRaise(
+    procedure
+    begin
+      FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('no/such/method'));
+    end,
+    EJRPCRemoteError);
+end;
+
 procedure TJRPCClientTest.TestNotificationIsNeverRead;
 var
   LNotified: string;
-  LNotification: TJRPCNotification;
 begin
   LNotified := '';
 
-  // If the client ever tried to read after a notification, this would raise.
-  FClient.OnTransport :=
-    function(const ARequest: string): string
+  // If the client ever tried to read after a notification, this would fail.
+  FClient.Transport := TJRPCFuncTransport.Create(
+    function (const AText: string): string
     begin
       Assert.Fail('a notification must not go through the read path');
       Result := '';
-    end;
-
-  FClient.OnNotify :=
-    procedure(const ARequest: string)
+    end,
+    procedure (const AText: string)
     begin
-      LNotified := ARequest;
-    end;
+      LNotified := AText;
+    end);
 
-  LNotification := TJRPCNotification.Create;
-  try
-    LNotification.Method := 'math/notif';
-    LNotification.AddNamedParam('a', 1);
-    LNotification.AddNamedParam('b', 2);
-
-    FClient.Execute(LNotification);
-  finally
-    LNotification.Free;
-  end;
+  FClient.Notify(
+    TJRPCNotificationBuilder.New
+      .SetMethod('math/notif')
+      .AddNamedParam('a', 1)
+      .AddNamedParam('b', 2));
 
   Assert.IsTrue(LNotified.Contains('"method":"math/notif"'), LNotified);
   Assert.IsFalse(LNotified.Contains('"id"'), 'a notification carries no id: ' + LNotified);
@@ -928,52 +1017,20 @@ procedure TJRPCClientTest.TestNotificationOverLoopback;
 var
   LNotification: TJRPCNotification;
 begin
-  // With only OnTransport wired, the loopback returns '' for a notification and
-  // the client must not try to make sense of it.
+  // Without a send-only function the notification goes through the loopback,
+  // which answers '' - nothing to make sense of.
   LNotification := TJRPCNotification.Create;
   try
     LNotification.Method := 'math/notif';
     LNotification.AddNamedParam('a', 1);
     LNotification.AddNamedParam('b', 2);
 
-    FClient.Execute(LNotification);
+    FClient.Notify(LNotification);
   finally
     LNotification.Free;
   end;
 
   Assert.IsFalse(FSent.Contains('"id"'), 'a notification carries no id: ' + FSent);
-end;
-
-procedure TJRPCClientTest.TestNotificationBuilder;
-var
-  LNotified: string;
-begin
-  LNotified := '';
-
-  // Same guarantee as TestNotificationIsNeverRead, reached through the builder.
-  FClient.OnTransport :=
-    function(const ARequest: string): string
-    begin
-      Assert.Fail('a notification must not go through the read path');
-      Result := '';
-    end;
-
-  FClient.OnNotify :=
-    procedure(const ARequest: string)
-    begin
-      LNotified := ARequest;
-    end;
-
-  // The builder owns the notification for the whole statement, so there is
-  // nothing to free and no try/finally.
-  FClient.Execute(
-    TJRPCNotificationBuilder.New
-      .SetMethod('math/notif')
-      .AddNamedParam('a', 1)
-      .AddNamedParam('b', 2));
-
-  Assert.IsTrue(LNotified.Contains('"method":"math/notif"'), LNotified);
-  Assert.IsFalse(LNotified.Contains('"id"'), 'a notification carries no id: ' + LNotified);
 end;
 
 procedure TJRPCClientTest.TestExecuteTakesARequestBuilder;
@@ -1015,8 +1072,7 @@ begin
 
     LAnswers := FClient.ExecuteBatch(LBatch);
     try
-      // An error inside a batch is returned, never raised: raising would throw
-      // away the answers to the elements that did succeed.
+      // An error inside a batch is returned, never raised.
       Assert.AreEqual(3, Integer(LAnswers.Count), 'the notification is not answered');
 
       LAnswer := TJRPCClient.FindById(LAnswers, LSecond.Id);
@@ -1042,8 +1098,6 @@ var
 begin
   LBatch := TJRPCMessages.Create(True);
   try
-    // A batch of one still goes out as an array: Single would make ToJson emit
-    // a bare object.
     LRequest := NewRequest('math/sum');
     LRequest.AddNamedParam('a', 1);
     LRequest.AddNamedParam('b', 2);
@@ -1052,7 +1106,6 @@ begin
     LAnswers := FClient.ExecuteBatch(LBatch);
     try
       Assert.IsTrue(FSent.StartsWith('['), 'a batch is an array: ' + FSent);
-      // Line-framed transports read a payload up to the first LF.
       Assert.AreEqual(0, Pos(#10, FSent), 'the payload must stay on one line: ' + FSent);
       Assert.AreEqual(1, Integer(LAnswers.Count));
     finally
@@ -1134,14 +1187,14 @@ begin
   LInCount := 0;
 
   FClient.OnBeforeSend :=
-    procedure(const AJSON: string)
+    procedure (const AJSON: string)
     begin
       LOut := AJSON;
       Inc(LOutCount);
     end;
 
   FClient.OnAfterReceive :=
-    procedure(const AJSON: string)
+    procedure (const AJSON: string)
     begin
       LIn := AJSON;
       Inc(LInCount);
@@ -1168,7 +1221,6 @@ begin
     LRequest.AddNamedParam('a', 1);
     LRequest.AddNamedParam('b', 1);
 
-    // Nothing to free at the call site, and an error would still surface.
     FClient.Execute(LRequest);
     Assert.IsTrue(FSent.Contains('"method":"math/sum"'), FSent);
   finally
@@ -1176,58 +1228,90 @@ begin
   end;
 end;
 
-procedure TJRPCClientTest.TestExecuteRawIsUntouched;
+procedure TJRPCClientTest.TestClosedClientRaisesUntilANewTransport;
 var
-  LReply: string;
+  LClosed: Integer;
+  LKind: TJRPCCloseKind;
 begin
-  // Deliberately malformed: the escape hatch must not tidy it up on the way out.
-  LReply := FClient.ExecuteRaw('{not json');
+  LClosed := 0;
+  LKind := TJRPCCloseKind.Error;
+  FClient.OnClose :=
+    procedure (const AInfo: TJRPCCloseInfo)
+    begin
+      Inc(LClosed);
+      LKind := AInfo.Kind;
+    end;
 
-  Assert.AreEqual('{not json', FSent, 'the raw payload goes out verbatim');
-  Assert.IsTrue(LReply.Contains('-32700'), 'the server answers a parse error: ' + LReply);
+  FClient.Open;
+  Assert.IsTrue(FClient.Active);
+
+  FClient.Close;
+  FClient.Close;
+  Assert.IsFalse(FClient.Active);
+  Assert.AreEqual(1, LClosed, 'OnClose fires once');
+  Assert.IsTrue(LKind = TJRPCCloseKind.Local);
+
+  Assert.WillRaise(
+    procedure
+    begin
+      FClient.ExecuteAs<Integer>(TJRPCRequestBuilder.New.SetMethod('math/sum'));
+    end,
+    EJRPCClientError);
+
+  // A new transport opens the client again.
+  FClient.Transport := TJRPCFuncTransport.Create(
+    function (const AText: string): string
+    begin
+      Result := FServer.ProcessRequest(AText);
+    end);
+
+  Assert.AreEqual(3, FClient.ExecuteAs<Integer>(
+    TJRPCRequestBuilder.New.SetMethod('math/sum').AddNamedParam('a', 1).AddNamedParam('b', 2)));
 end;
 
-procedure TJRPCClientTest.TestIdEquality;
+procedure TJRPCClientTest.TestStreamNotificationGoesToItsCall;
 var
-  LFirst, LSecond, LAbsent, LDefaultAbsent: TJRPCID;
+  LBuilder: IJRPCRequestBuilder;
+  LCall: IJRPCCall<Integer>;
+  LMethods: TStringList;
+  LGlobal: Integer;
 begin
-  LFirst := 7;
-  LSecond := 7;
-  LAbsent := nil;
+  LGlobal := 0;
+  LMethods := TStringList.Create;
+  try
+    StubFrames([
+      '{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}',
+      '{"jsonrpc":"2.0","id":7,"result":42}']);
 
-  Assert.IsTrue(LFirst = LSecond, 'the same number is the same id');
-  Assert.IsFalse(LFirst = LAbsent, 'an id is not the absent id');
-  Assert.IsTrue(LAbsent = LDefaultAbsent, 'two absent ids are equal');
+    FClient.OnNotification :=
+      procedure (const ANotification: TJRPCNotification)
+      begin
+        Inc(LGlobal);
+      end;
+
+    // The frames are scripted with id 7.
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    LCall := FClient.ExecuteAsync<Integer>(LBuilder,
+      procedure (const ANotification: TJRPCNotification)
+      begin
+        LMethods.Add(ANotification.Method);
+      end);
+
+    // The handler of the call runs before the answer that follows it.
+    Assert.AreEqual(42, LCall.Value);
+    Assert.AreEqual(1, LMethods.Count, 'the notification goes to its call');
+    Assert.AreEqual('notifications/progress', LMethods[0]);
+    Assert.AreEqual(0, LGlobal, 'and not to OnNotification');
+  finally
+    FClient.OnNotification := nil;
+    LMethods.Free;
+  end;
 end;
 
-procedure TJRPCClientTest.TestIdInequalityAcrossKinds;
+procedure TJRPCClientTest.TestStreamNotificationWithoutHandlerGoesToOnNotification;
 var
-  LNumber, LText: TJRPCID;
-begin
-  LNumber := 7;
-  LText := '7';
-
-  // AsString would render both as '7': the kind is part of the identity.
-  Assert.IsFalse(LNumber = LText);
-  Assert.IsTrue(LNumber <> LText);
-end;
-
-procedure TJRPCClientTest.TestIdEqualityIsNotTruncated;
-var
-  LLarge, LLargeAgain, LZero: TJRPCID;
-begin
-  // 2^32: AsInteger would truncate it to 0 and make it equal to the id 0.
-  LLarge := Int64(4294967296);
-  LLargeAgain := Int64(4294967296);
-  LZero := 0;
-
-  Assert.IsFalse(LLarge = LZero);
-  Assert.IsTrue(LLarge = LLargeAgain);
-end;
-
-procedure TJRPCClientTest.TestStreamingNotificationBeforeResponse;
-var
-  LTransport: IJRPCStreamingTransport;
   LBuilder: IJRPCRequestBuilder;
   LCount: Integer;
   LMethod: string;
@@ -1235,485 +1319,513 @@ begin
   LCount := 0;
   LMethod := '';
 
-  LTransport := TFrameTransport.Create([
+  StubFrames([
     '{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}',
     '{"jsonrpc":"2.0","id":7,"result":42}']);
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
+  // Direct: the handler runs on the thread that reads the stream, so it has
+  // run by the time the call returns.
+  FClient.DispatchMode := TJRPCDispatchMode.Direct;
   FClient.OnNotification :=
-    procedure(const ANotification: TJRPCNotification)
+    procedure (const ANotification: TJRPCNotification)
     begin
       Inc(LCount);
       LMethod := ANotification.Method;
     end;
 
-  try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
 
-    Assert.AreEqual<Integer>(42, FClient.ExecuteAs<Integer>(LBuilder));
-    Assert.AreEqual(1, LCount, 'the notification must be delivered');
-    Assert.AreEqual('notifications/progress', LMethod);
-  finally
-    FClient.Transport := nil;
-    FClient.OnNotification := nil;
-  end;
+  Assert.AreEqual<Integer>(42, FClient.ExecuteAs<Integer>(LBuilder));
+  Assert.AreEqual(1, LCount, 'the notification must be delivered');
+  Assert.AreEqual('notifications/progress', LMethod);
 end;
 
-procedure TJRPCClientTest.TestStreamingErrorFrameRaises;
+procedure TJRPCClientTest.TestStreamErrorFrameRaises;
 var
-  LTransport: IJRPCStreamingTransport;
   LBuilder: IJRPCRequestBuilder;
 begin
-  LTransport := TFrameTransport.Create([
+  StubFrames([
     '{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"bad args","data":{"detail":1}}}']);
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
-  try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
 
-    try
-      FClient.ExecuteAs<Integer>(LBuilder);
-      Assert.Fail('expected EJRPCRemoteError');
-    except
-      on E: EJRPCRemoteError do
-      begin
-        Assert.AreEqual(-32602, E.Code);
-        Assert.IsNotNull(E.ErrorData);
-        Assert.AreEqual(1, (E.ErrorData as TJSONObject).GetValue<Integer>('detail'));
-      end;
+  try
+    FClient.ExecuteAs<Integer>(LBuilder);
+    Assert.Fail('expected EJRPCRemoteError');
+  except
+    on E: EJRPCRemoteError do
+    begin
+      Assert.AreEqual(-32602, E.Code);
+      Assert.IsNotNull(E.ErrorData);
+      Assert.AreEqual(1, (E.ErrorData as TJSONObject).GetValue<Integer>('detail'));
     end;
-  finally
-    FClient.Transport := nil;
   end;
 end;
 
-procedure TJRPCClientTest.TestStreamingBatchOfOneErrorFrameRaises;
+procedure TJRPCClientTest.TestStreamArrayOfOneErrorFrameRaises;
 var
-  LTransport: IJRPCStreamingTransport;
-  LBuilder: IJRPCRequestBuilder;
-  LError: TClass;
-begin
-  LTransport := TFrameTransport.Create([
-    '[{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"bad args"}}]']);
-
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
-  try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
-
-    LError := nil;
-    try
-      FClient.ExecuteAs<Integer>(LBuilder);
-    except
-      on E: Exception do
-        LError := E.ClassType;
-    end;
-
-    Assert.IsTrue(LError = EJRPCClientError,
-      'expected EJRPCClientError, got ' +
-      IfThen(Assigned(LError), LError.ClassName, 'no exception'));
-  finally
-    FClient.Transport := nil;
-  end;
-end;
-
-procedure TJRPCClientTest.TestStreamingResultSurvivesFailureAfterIt;
-var
-  LTransport: TFrameTransport;
   LBuilder: IJRPCRequestBuilder;
 begin
-  // The answer arrives, the callback stops the read, and the transport then
-  // fails winding down. The caller asked for the answer and has it: it must
-  // get it, and the clone made for it must not leak.
-  LTransport := TFrameTransport.Create(['{"jsonrpc":"2.0","id":7,"result":42}']);
-  LTransport.Failure := 'connection reset while closing';
+  StubFrames([
+    '[{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"bad args","data":{"detail":1}}}]']);
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
+
   try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
-
-    Assert.AreEqual(42, FClient.ExecuteAs<Integer>(LBuilder));
-  finally
-    FClient.Transport := nil;
+    FClient.ExecuteAs<Integer>(LBuilder);
+    Assert.Fail('expected EJRPCRemoteError');
+  except
+    on E: EJRPCRemoteError do
+    begin
+      Assert.AreEqual(-32602, E.Code);
+      // The raw element is what the data is read from, inside the array too.
+      Assert.IsNotNull(E.ErrorData);
+    end;
   end;
 end;
 
-procedure TJRPCClientTest.TestStreamingErrorSurvivesFailureAfterIt;
+procedure TJRPCClientTest.TestStreamResultSurvivesFailureAfterIt;
 var
-  LTransport: TFrameTransport;
   LBuilder: IJRPCRequestBuilder;
 begin
-  // The same with an error answer: the peer's error is what the caller gets,
-  // not the transport's - and the exception built for it must not leak.
-  LTransport := TFrameTransport.Create([
-    '{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"bad args","data":{"detail":1}}}']);
-  LTransport.Failure := 'connection reset while closing';
+  // The answer arrives, then the transport fails winding down. The caller
+  // asked for the answer and has it.
+  StubFrames(['{"jsonrpc":"2.0","id":7,"result":42}'], 'connection reset while closing');
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
+
+  Assert.AreEqual(42, FClient.ExecuteAs<Integer>(LBuilder));
+end;
+
+procedure TJRPCClientTest.TestStreamErrorSurvivesFailureAfterIt;
+var
+  LBuilder: IJRPCRequestBuilder;
+begin
+  StubFrames([
+    '{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"bad args","data":{"detail":1}}}'],
+    'connection reset while closing');
+
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
+
   try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
-
-    try
-      FClient.ExecuteAs<Integer>(LBuilder);
-      Assert.Fail('expected EJRPCRemoteError');
-    except
-      on E: EJRPCRemoteError do
-        Assert.AreEqual(-32602, E.Code);
-    end;
-  finally
-    FClient.Transport := nil;
+    FClient.ExecuteAs<Integer>(LBuilder);
+    Assert.Fail('expected EJRPCRemoteError');
+  except
+    on E: EJRPCRemoteError do
+      Assert.AreEqual(-32602, E.Code);
   end;
 end;
 
-procedure TJRPCClientTest.TestStreamingFailureBeforeAnswerRaises;
+procedure TJRPCClientTest.TestStreamFailureBeforeAnswerRaises;
 var
-  LTransport: TFrameTransport;
   LBuilder: IJRPCRequestBuilder;
   LMessage: string;
 begin
   // No answer yet: the failure is the outcome of the call, raised as it is.
-  LTransport := TFrameTransport.Create(['{"jsonrpc":"2.0","method":"notifications/progress"}']);
-  LTransport.Failure := 'connection reset mid-stream';
+  StubFrames(['{"jsonrpc":"2.0","method":"notifications/progress"}'],
+    'connection reset mid-stream');
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
+
+  LMessage := '';
   try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
-
-    LMessage := '';
-    try
-      FClient.ExecuteAs<Integer>(LBuilder);
-    except
-      on E: Exception do
-        LMessage := E.Message;
-    end;
-    Assert.AreEqual('connection reset mid-stream', LMessage);
-  finally
-    FClient.Transport := nil;
+    FClient.ExecuteAs<Integer>(LBuilder);
+  except
+    on E: Exception do
+      LMessage := E.Message;
   end;
+  Assert.AreEqual('connection reset mid-stream', LMessage);
 end;
 
-procedure TJRPCClientTest.TestStreamingEndsWithoutResponseRaises;
+procedure TJRPCClientTest.TestStreamEndsWithoutResponseRaises;
 var
-  LTransport: IJRPCStreamingTransport;
   LBuilder: IJRPCRequestBuilder;
 begin
-  LTransport := TFrameTransport.Create([
-    '{"jsonrpc":"2.0","method":"notifications/progress","params":{}}']);
+  StubFrames(['{"jsonrpc":"2.0","method":"notifications/progress","params":{}}']);
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
+
   try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
-
-    try
-      FClient.ExecuteAs<Integer>(LBuilder);
-      Assert.Fail('expected EJRPCClientError');
-    except
-      on E: EJRPCClientError do
-        Assert.IsTrue(E.Message <> '', 'the failure must explain itself');
-    end;
-  finally
-    FClient.Transport := nil;
+    FClient.ExecuteAs<Integer>(LBuilder);
+    Assert.Fail('expected EJRPCClientError');
+  except
+    on E: EJRPCClientError do
+      Assert.IsTrue(E.Message <> '', 'the failure must explain itself');
   end;
 end;
 
-procedure TJRPCClientTest.TestStreamingWrongIdRaises;
+procedure TJRPCClientTest.TestStreamWrongIdRaises;
 var
-  LTransport: IJRPCStreamingTransport;
+  LBuilder: IJRPCRequestBuilder;
+  LReported: string;
+begin
+  LReported := '';
+  FClient.OnError :=
+    procedure (E: Exception; var AAction: TJRPCErrorAction)
+    begin
+      if LReported = '' then
+        LReported := E.Message;
+    end;
+
+  StubFrames(['{"jsonrpc":"2.0","id":8,"result":42}']);
+
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
+
+  Assert.WillRaise(
+    procedure
+    begin
+      FClient.ExecuteAs<Integer>(LBuilder);
+    end,
+    EJRPCClientError);
+  Assert.IsTrue(LReported.Contains('[8]'), 'the stray answer is reported: ' + LReported);
+end;
+
+procedure TJRPCClientTest.TestStreamPeerRequestIsAnswered;
+var
+  LBuilder: IJRPCRequestBuilder;
+  LReplies: TStringList;
+begin
+  // A request of the peer inside the answer stream (sampling, in legacy MCP):
+  // it is served like any other, and the answer goes out as a new message.
+  LReplies := TStringList.Create;
+  try
+    FClient.Transport := TJRPCFuncTransport.CreateFramed(
+      procedure (const AText: string; const AOnFrame: TJRPCFrameSink)
+      begin
+        AOnFrame('{"jsonrpc":"2.0","id":"s1","method":"server/ping"}');
+        AOnFrame('{"jsonrpc":"2.0","id":7,"result":42}');
+      end,
+      procedure (const AText: string)
+      begin
+        LReplies.Add(AText);
+      end);
+
+    FClient.DispatchMode := TJRPCDispatchMode.Direct;
+    FClient.OnRequest :=
+      procedure (const ARequest: TJRPCRequest; const AReply: IJRPCReply)
+      begin
+        AReply.Result('pong');
+      end;
+
+    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+    LBuilder.Build.Id := 7;
+
+    Assert.AreEqual(42, FClient.ExecuteAs<Integer>(LBuilder));
+    Assert.AreEqual(1, LReplies.Count, LReplies.Text);
+    Assert.IsTrue(LReplies[0].Contains('"id":"s1"'), LReplies[0]);
+    Assert.IsTrue(LReplies[0].Contains('"result":"pong"'), LReplies[0]);
+  finally
+    FClient.OnRequest := nil;
+    FClient.Transport := nil;
+    LReplies.Free;
+  end;
+end;
+
+procedure TJRPCClientTest.TestStreamArrayFrameIsMatchedById;
+var
   LBuilder: IJRPCRequestBuilder;
 begin
-  LTransport := TFrameTransport.Create([
-    '{"jsonrpc":"2.0","id":8,"result":42}']);
+  StubFrames(['[{"jsonrpc":"2.0","id":7,"result":1},{"jsonrpc":"2.0","id":8,"result":2}]']);
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
-  try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
 
-    try
-      FClient.ExecuteAs<Integer>(LBuilder);
-      Assert.Fail('expected an id mismatch');
-    except
-      on E: EJRPCClientError do
-        Assert.IsTrue(E.Message.Contains('does not match'), E.Message);
-    end;
-  finally
-    FClient.Transport := nil;
-  end;
+  Assert.AreEqual(1, FClient.ExecuteAs<Integer>(LBuilder));
 end;
 
-procedure TJRPCClientTest.TestStreamingUnexpectedRequestRaises;
+procedure TJRPCClientTest.TestStreamTraceSeesEachFrame;
 var
-  LTransport: IJRPCStreamingTransport;
-  LBuilder: IJRPCRequestBuilder;
-begin
-  // A bidirectional peer may send a request; this client has no channel to
-  // answer it, so it must say so rather than drop it.
-  LTransport := TFrameTransport.Create([
-    '{"jsonrpc":"2.0","id":99,"method":"server/ping"}']);
-
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
-  try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
-
-    try
-      FClient.ExecuteAs<Integer>(LBuilder);
-      Assert.Fail('expected EJRPCClientError');
-    except
-      on E: EJRPCClientError do
-        Assert.IsTrue(E.Message <> '', 'the failure must explain itself');
-    end;
-  finally
-    FClient.Transport := nil;
-  end;
-end;
-
-procedure TJRPCClientTest.TestStreamingBatchFrameRaises;
-var
-  LTransport: IJRPCStreamingTransport;
-  LBuilder: IJRPCRequestBuilder;
-begin
-  LTransport := TFrameTransport.Create([
-    '[{"jsonrpc":"2.0","id":7,"result":1},{"jsonrpc":"2.0","id":8,"result":2}]']);
-
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
-  try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
-
-    try
-      FClient.ExecuteAs<Integer>(LBuilder);
-      Assert.Fail('expected EJRPCClientError');
-    except
-      on E: EJRPCClientError do
-        Assert.IsTrue(E.Message <> '', 'the failure must explain itself');
-    end;
-  finally
-    FClient.Transport := nil;
-  end;
-end;
-
-procedure TJRPCClientTest.TestStreamingTraceSeesEachFrame;
-var
-  LTransport: IJRPCStreamingTransport;
   LBuilder: IJRPCRequestBuilder;
   LCount: Integer;
 begin
   LCount := 0;
 
-  LTransport := TFrameTransport.Create([
+  StubFrames([
     '{"jsonrpc":"2.0","method":"notifications/progress","params":{}}',
     '{"jsonrpc":"2.0","id":7,"result":42}']);
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
   FClient.OnAfterReceive :=
-    procedure(const AJSON: string)
+    procedure (const AJSON: string)
     begin
       Inc(LCount);
     end;
 
-  try
-    LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
-    LBuilder.Build.Id := 7;
+  LBuilder := TJRPCRequestBuilder.New.SetMethod('stream/echo');
+  LBuilder.Build.Id := 7;
 
-    FClient.ExecuteAs<Integer>(LBuilder);
-    Assert.AreEqual(2, LCount, 'OnAfterReceive sees every frame, not the whole body');
-  finally
-    FClient.Transport := nil;
-    FClient.OnAfterReceive := nil;
+  FClient.ExecuteAs<Integer>(LBuilder);
+  Assert.AreEqual(2, LCount, 'OnAfterReceive sees every frame, not the whole body');
+end;
+
+procedure TJRPCClientTest.TestExecuteAsyncValue;
+var
+  LCall: IJRPCCall<Integer>;
+begin
+  LCall := FClient.ExecuteAsync<Integer>(
+    TJRPCRequestBuilder.New.SetMethod('math/sum').AddNamedParam('a', 20).AddNamedParam('b', 22));
+
+  Assert.IsTrue(LCall.Wait(5000), 'the call must complete');
+  Assert.IsTrue(LCall.Completed);
+  Assert.IsFalse(LCall.Id.IsNull, 'the call carries the id it went out with');
+  Assert.AreEqual(42, LCall.Value);
+  // Value can be read again
+  Assert.AreEqual(42, LCall.Value);
+end;
+
+procedure TJRPCClientTest.TestExecuteAsyncRemoteError;
+var
+  LCall: IJRPCCall<Integer>;
+begin
+  LCall := FClient.ExecuteAsync<Integer>(TJRPCRequestBuilder.New.SetMethod('no/such/method'));
+
+  try
+    LCall.Value;
+    Assert.Fail('expected EJRPCRemoteError');
+  except
+    on E: EJRPCRemoteError do
+      Assert.AreEqual(JRPC_METHOD_NOT_FOUND, E.Code);
   end;
 end;
 
-procedure TJRPCClientTest.TestExecuteStreamDeliversFrames;
+procedure TJRPCClientTest.TestExecuteAsyncCallsOverlap;
+const
+  CALLS = 4;
+  DELAY_MS = 300;
 var
-  LTransport: IJRPCStreamingTransport;
-  LStream: IJRPCStream;
+  LCalls: TArray<IJRPCCall<Integer>>;
+  LWatch: TStopwatch;
+  LIndex: Integer;
+begin
+  // A RoundTrip Send blocks for the whole exchange: the client runs each one
+  // on a task, so four slow answers take about as long as one.
+  FClient.Transport := TJRPCFuncTransport.Create(
+    function (const AText: string): string
+    begin
+      Sleep(DELAY_MS);
+      Result := FServer.ProcessRequest(AText);
+    end);
+
+  LWatch := TStopwatch.StartNew;
+  SetLength(LCalls, CALLS);
+  for LIndex := 0 to CALLS - 1 do
+    LCalls[LIndex] := FClient.ExecuteAsync<Integer>(
+      TJRPCRequestBuilder.New.SetMethod('math/sum')
+        .AddNamedParam('a', LIndex).AddNamedParam('b', 100));
+
+  for LIndex := 0 to CALLS - 1 do
+    Assert.AreEqual(100 + LIndex, LCalls[LIndex].Value);
+  LWatch.Stop;
+
+  Assert.IsTrue(LWatch.ElapsedMilliseconds < CALLS * DELAY_MS,
+    Format('the calls ran one after the other: %d ms', [LWatch.ElapsedMilliseconds]));
+end;
+
+procedure TJRPCClientTest.TestExecuteAsyncFailureRaisedOnceThenQuoted;
+var
+  LCall: IJRPCCall<Integer>;
+  LFirst, LSecond: string;
+begin
+  StubFrames(['{"jsonrpc":"2.0","method":"notifications/progress"}'], 'link down');
+
+  LCall := FClient.ExecuteAsync<Integer>(TJRPCRequestBuilder.New.SetMethod('stream/echo'));
+
+  LFirst := '';
+  try
+    LCall.Value;
+  except
+    on E: Exception do
+      LFirst := E.ClassName + ': ' + E.Message;
+  end;
+
+  LSecond := '';
+  try
+    LCall.Value;
+  except
+    on E: Exception do
+      LSecond := E.ClassName + ': ' + E.Message;
+  end;
+
+  // The transport's own exception, then a client error that quotes it.
+  Assert.AreEqual('Exception: link down', LFirst);
+  Assert.IsTrue(LSecond.StartsWith(EJRPCClientError.ClassName), LSecond);
+  Assert.IsTrue(LSecond.Contains('link down'), LSecond);
+end;
+
+procedure TJRPCClientTest.TestExecuteAsyncDeliversItsNotifications;
+var
+  LCall: IJRPCCall<Integer>;
   LCount: Integer;
+  LGlobal: Integer;
 begin
   LCount := 0;
+  LGlobal := 0;
 
-  LTransport := TFrameTransport.Create([
+  // A subscription that ends abruptly: three notifications and no answer.
+  StubFrames([
     '{"jsonrpc":"2.0","method":"notifications/first"}',
     '{"jsonrpc":"2.0","method":"notifications/second"}',
     '{"jsonrpc":"2.0","method":"notifications/third"}']);
 
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
-  try
-    LStream := FClient.ExecuteStream(
-      TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
-      function(const AJSON: string): Boolean
-      begin
-        Inc(LCount);
-        Result := True;
-      end);
+  FClient.DispatchMode := TJRPCDispatchMode.Direct;
+  FClient.OnNotification :=
+    procedure (const ANotification: TJRPCNotification)
+    begin
+      Inc(LGlobal);
+    end;
 
-    Assert.IsTrue(LStream.Wait(5000), 'the stream must finish');
-    Assert.IsTrue(LStream.Completed);
-    Assert.AreEqual(3, LCount, 'every frame must be delivered');
-  finally
-    FClient.Transport := nil;
-  end;
+  LCall := FClient.ExecuteAsync<Integer>(
+    TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
+    procedure (const ANotification: TJRPCNotification)
+    begin
+      TInterlocked.Increment(LCount);
+    end);
+
+  Assert.IsTrue(LCall.Wait(5000), 'the call must end');
+  Assert.AreEqual(3, LCount, 'every notification goes to the call');
+  Assert.AreEqual(0, LGlobal, 'none of them to OnNotification');
+  Assert.WillRaise(
+    procedure
+    begin
+      LCall.Value;
+    end,
+    EJRPCClientError);
 end;
 
-procedure TJRPCClientTest.TestExecuteStreamCloseAborts;
+procedure TJRPCClientTest.TestCancelAbortsTheRead;
 var
-  LTransport: IJRPCStreamingTransport;
-  LStream: IJRPCStream;
-  LFirstFrame: TEvent;
-  LFrames: Integer;
+  LTransport: TListenTransport;
+  LCall: IJRPCCall<Integer>;
+  LFirst: TEvent;
+  LEnded: TJRPCCallEnd;
+  LEndedId: string;
+  LWatch: TStopwatch;
 begin
-  LFrames := 0;
-  LFirstFrame := TEvent.Create(nil, True, False, '');
-  LTransport := TBlockingFrameTransport.Create;
-
-  FClient.Transport := LTransport;
-  FClient.OnTransport := nil;
+  LFirst := TEvent.Create(nil, True, False, '');
   try
-    LStream := FClient.ExecuteStream(
-      TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
-      function(const AJSON: string): Boolean
+    LTransport := TListenTransport.Create(False);
+    FClient.Transport := LTransport;
+
+    LEndedId := '';
+    FClient.OnCallEnded :=
+      procedure (const AId: TJRPCID; AReason: TJRPCCallEnd)
       begin
-        Inc(LFrames);
-        LFirstFrame.SetEvent;
-        Result := True;
+        LEnded := AReason;
+        LEndedId := AId.AsString;
+      end;
+
+    LCall := FClient.ExecuteAsync<Integer>(
+      TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
+      procedure (const ANotification: TJRPCNotification)
+      begin
+        LFirst.SetEvent;
       end);
 
-    Assert.IsTrue(LFirstFrame.WaitFor(5000) = wrSignaled,
-      'the first frame must arrive');
-    Assert.IsFalse(LStream.Wait(100), 'the read is still blocked');
+    Assert.IsTrue(LFirst.WaitFor(5000) = wrSignaled, 'the first notification must arrive');
+    Assert.IsFalse(LCall.Wait(100), 'the read is still going');
 
-    LStream.Close;
+    LCall.Cancel;
 
-    Assert.IsTrue(LStream.Wait(5000), 'Close must unblock the read');
-    Assert.IsTrue(LStream.Completed);
-    Assert.AreEqual(1, LFrames);
-  finally
-    LStream := nil;
+    Assert.IsTrue(LCall.Completed, 'Cancel completes the call');
+    Assert.AreEqual(1, LTransport.Aborts, 'and aborts the read');
+    Assert.IsTrue(LEnded = TJRPCCallEnd.Cancelled);
+    Assert.AreEqual(LCall.Id.AsString, LEndedId);
+    Assert.WillRaise(
+      procedure
+      begin
+        LCall.Value;
+      end,
+      EJRPCClientError);
+
+    // Close waits for the aborted Send, which ends at once.
+    LWatch := TStopwatch.StartNew;
     FClient.Transport := nil;
-    LFirstFrame.Free;
+    Assert.IsTrue(LWatch.ElapsedMilliseconds < 1000,
+      Format('the aborted read held Close for %d ms', [LWatch.ElapsedMilliseconds]));
+  finally
+    FClient.OnCallEnded := nil;
+    LFirst.Free;
   end;
 end;
 
-procedure TJRPCClientTest.RunSelfCapturingStream(AFreed: PBoolean);
+procedure TJRPCClientTest.TestCancelledBeforeItStartsNeverSends;
 var
-  LStream: IJRPCStream;
+  LTransport: TListenTransport;
+  LCall: IJRPCCall<Integer>;
+  LRound: Integer;
+  LWatch: TStopwatch;
+begin
+  // Cancel right after ExecuteAsync usually lands before the task has called
+  // the transport, which would then clear the abort as its read starts and
+  // wait on a silent peer. Several rounds, since which side wins is up to the
+  // scheduler.
+  for LRound := 1 to 10 do
+  begin
+    LTransport := TListenTransport.Create(True);
+    FClient.Transport := LTransport;
+
+    LCall := FClient.ExecuteAsync<Integer>(
+      TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'));
+    LCall.Cancel;
+    Assert.IsTrue(LCall.Wait(100));
+    LCall := nil;
+
+    LWatch := TStopwatch.StartNew;
+    FClient.Transport := nil;
+    Assert.IsTrue(LWatch.ElapsedMilliseconds < 1500,
+      Format('round %d: a call cancelled before it started held Close for %d ms',
+        [LRound, LWatch.ElapsedMilliseconds]));
+  end;
+end;
+
+procedure TJRPCClientTest.RunSelfCapturingCall(AFreed: PBoolean);
+var
+  LCall: IJRPCCall<Integer>;
   LProbe: IInterface;
 begin
   LProbe := TReleaseProbe.Create(AFreed);
 
-  LStream := FClient.ExecuteStream(
+  LCall := FClient.ExecuteAsync<Integer>(
     TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
-    function(const AJSON: string): Boolean
+    procedure (const ANotification: TJRPCNotification)
     begin
-      // Captures the stream: the natural way to stop it from its own
-      // callback. Never true here - capturing it is what matters.
-      if AJSON = '' then
-        LStream.Close;
-      Result := Assigned(LProbe);
+      // Captures the call: the natural way to stop it from its own handler.
+      if ANotification.Method = 'never' then
+        LCall.Cancel;
+      if not Assigned(LProbe) then
+        Exit;
     end);
 
-  Assert.IsTrue(LStream.Wait(5000), 'the stream must finish');
-  // No LStream := nil: the method ends with the stream still captured, as a
-  // caller's would.
+  Assert.IsTrue(LCall.Wait(5000), 'the call must end');
+  // No LCall := nil: the method ends with the call still captured.
 end;
 
-procedure TJRPCClientTest.TestExecuteStreamReleasesSelfCapturingCallback;
+procedure TJRPCClientTest.TestReleasesSelfCapturingHandler;
 var
   LFreed: Boolean;
   LWait: Integer;
 begin
   LFreed := False;
 
-  FClient.Transport := TFrameTransport.Create([
-    '{"jsonrpc":"2.0","method":"notifications/first"}']);
-  FClient.OnTransport := nil;
-  try
-    RunSelfCapturingStream(@LFreed);
+  StubFrames(['{"jsonrpc":"2.0","method":"notifications/first"}']);
+  RunSelfCapturingCall(@LFreed);
 
-    // The stream thread lets go of its own reference just after the event the
-    // Wait saw: give it a moment.
-    LWait := 0;
-    while not LFreed and (LWait < 2000) do
-    begin
-      Sleep(20);
-      Inc(LWait, 20);
-    end;
-
-    Assert.IsTrue(LFreed,
-      'a callback that captures its own stream must not keep it alive');
-  finally
-    FClient.Transport := nil;
-  end;
-end;
-
-procedure TJRPCClientTest.TestExecuteStreamClosedBeforeItStartsEnds;
-var
-  LTransport: TResettingSilentTransport;
-  LStream: IJRPCStream;
-  LRound: Integer;
-begin
-  // Close right after ExecuteStream usually lands before the stream thread
-  // has called the transport. The transport then clears the abort as its
-  // call starts, and waits on a silent peer: the close was lost. Several
-  // rounds, since which side wins is up to the scheduler.
-  for LRound := 1 to 10 do
+  // The task lets go of its references just after the call completes.
+  LWait := 0;
+  while not LFreed and (LWait < 2000) do
   begin
-    LTransport := TResettingSilentTransport.Create;
-    FClient.Transport := LTransport;
-    FClient.OnTransport := nil;
-    try
-      LStream := FClient.ExecuteStream(
-        TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
-        function(const AJSON: string): Boolean
-        begin
-          Result := True;
-        end);
-      LStream.Close;
-
-      Assert.IsTrue(LStream.Wait(1500),
-        Format('round %d: a stream closed before it started must end', [LRound]));
-      LStream := nil;
-    finally
-      FClient.Transport := nil;
-    end;
+    Sleep(20);
+    Inc(LWait, 20);
   end;
-end;
 
-procedure TJRPCClientTest.TestExecuteStreamWithoutStreamingTransportRaises;
-begin
-  FClient.Transport := nil;
-  FClient.OnTransport :=
-    function(const ARequest: string): string
-    begin
-      Result := '{}';
-    end;
-
-  try
-    FClient.ExecuteStream(
-      TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'), nil);
-    Assert.Fail('expected EJRPCClientError');
-  except
-    on E: EJRPCClientError do
-      Assert.IsTrue(E.Message <> '', 'the refusal must explain itself');
-  end;
+  Assert.IsTrue(LFreed, 'a handler that captures its own call must not keep it alive');
 end;
 
 procedure TJRPCClientTest.TestNeonConfigIsHonoured;
@@ -1722,19 +1834,11 @@ var
 begin
   // Echo the id the client chose, so the test does not depend on the shared
   // id counter's value.
-  FClient.OnTransport :=
-    function(const ARequest: string): string
-    var
-      LRequest: TJSONValue;
+  FClient.Transport := TJRPCFuncTransport.Create(
+    function (const AText: string): string
     begin
-      LRequest := TJSONObject.ParseJSONValue(ARequest);
-      try
-        Result := Format('{"jsonrpc":"2.0","id":%s,"result":{"some_value":42}}',
-          [(LRequest as TJSONObject).GetValue('id').ToJSON]);
-      finally
-        LRequest.Free;
-      end;
-    end;
+      Result := Format('{"jsonrpc":"2.0","id":%s,"result":{"some_value":42}}', [IdOf(AText)]);
+    end);
 
   // The default configuration expects someValue; Snake is what reads this one.
   FClient.NeonConfig := TNeonConfiguration.Snake;

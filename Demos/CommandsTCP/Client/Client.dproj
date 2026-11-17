@@ -165,6 +165,8 @@
             <Form>ClientForm</Form>
             <FormType>dfm</FormType>
         </DCCReference>
+        <DCCReference Include="Client.Transport.pas"/>
+        <DCCReference Include="..\Server\Server.Protocol.Api.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

@@ -14,16 +14,23 @@ whole protocol.
 Demos/CommandsTCP/
   Server/  Server.Form.Main.pas      the Indy transport - the whole server
            Server.Protocol.Api.pas   the five commands
-  Client/  Client.Form.Main.pas      one button per command
+  Client/  Client.Form.Main.pas      one TJRPCClient, three transports to pick from
+           Client.Transport.pas      the socket kept open, as a TJRPCPullTransport
 ```
 
-Build both projects with `BuildTCPCommands.bat` in the repository root, then run
-`Server\Win32\Debug\Server.exe` and `Client\Win32\Debug\Client.exe`.
+Build both projects from `CommandsTCP.groupproj`, then run `Bin\Server.exe` and
+`Bin\Client.exe`.
 
 The server starts listening on **port 11099** as soon as its window opens
 (`Server.exe <port>` overrides it) and logs every line in and out. The client has one
 button per command, editable arguments, and a **send raw** box for typing malformed JSON
 by hand to watch `-32700`, `-32600` and `-32601` come back.
+
+Before connecting, the client picks its transport: a socket that writes a line and reads
+the next one, a socket kept open and read on a thread of its own, or a `TJRPCServer` in
+the client process, with no `Server.exe` at all (see
+[Three transports, one client](#three-transports-one-client)). Besides the commands it
+has a timeout, a **burst** of calls in flight at once, a **batch** and a **notify** button.
 
 ## Design rules
 
@@ -271,50 +278,52 @@ before adding a command that touches anything outside its own arguments.
 
 `TJRPCClient` is the mirror image of `TJRPCServer`: where the server turns a string into a
 string, the client turns a method call into a string and the answer back into a value. It
-links no transport of its own, so the form says once how a line reaches the socket:
+links no transport of its own, so the form says how a line reaches the socket - in the
+simplest of its three transports, a `TJRPCFuncTransport` made of two closures:
 
 ```pascal
-FJRPCClient := TJRPCClient.Create(Self);
+FClient := TJRPCClient.Create(nil);
 
-FJRPCClient.OnTransport :=
-  function(const ARequest: string): string
+FClient.Transport := TJRPCFuncTransport.Create(
+  function (const ARequest: string): string
   begin
     tcpClient.IOHandler.WriteLn(ARequest, IndyTextEncoding_UTF8);
     Result := tcpClient.IOHandler.ReadLn(IndyTextEncoding_UTF8);
-  end;
-
-// A notification gets no answer line at all, so it must not read one.
-FJRPCClient.OnNotify :=
-  procedure(const ARequest: string)
+  end,
+  // A notification gets no answer line at all, so it must not read one.
+  procedure (const ARequest: string)
   begin
     tcpClient.IOHandler.WriteLn(ARequest, IndyTextEncoding_UTF8);
-  end;
+  end);
 ```
 
 The form also points `OnError` at its logger once, so no button handler needs a
 `try/except` of its own:
 
 ```pascal
-FJRPCClient.OnError :=
-  procedure(E: Exception)
+FClient.OnError :=
+  procedure (AError: Exception; var AAction: TJRPCErrorAction)
   begin
-    LogError(E);
+    LogError(AError);
+    AAction := TJRPCErrorAction.Abort;
   end;
 ```
 
-`OnError` only *reports*: the exception carries on out of the call exactly as if nothing
-were assigned, so the flow of a failed call does not change - centralize the logging there
-and keep whatever handling the call site needs.
+Setting `AAction` to `Abort` makes a failed call raise `EAbort` instead of its own
+exception, once it has been logged: the rest of the button's code is skipped, and the VCL
+drops an `EAbort` without showing a dialog. Left at its default, `Raise`, the exception
+would carry on out of the call exactly as if nothing were assigned; `Ignore` would make the
+call return an empty result instead of raising.
 
 After that a call is one expression, and the result comes back as a Delphi type:
 
 ```pascal
-LText := FJRPCClient.ExecuteAs<string>(
+LText := FClient.ExecuteAs<string>(
   TJRPCRequestBuilder.New
     .SetMethod('echo')
     .AddNamedParam('text', 'hello JRPC'));
 
-LEntries := FJRPCClient.ExecuteAs<TArray<TDirEntry>>(   // the entries are yours to free
+LEntries := FClient.ExecuteAs<TArray<TDirEntry>>(   // the entries are yours to free
   TJRPCRequestBuilder.New
     .SetMethod('dir/list')
     .AddNamedParam('path', APath)
@@ -322,20 +331,20 @@ LEntries := FJRPCClient.ExecuteAs<TArray<TDirEntry>>(   // the entries are yours
 ```
 
 `ExecuteAsJSONValue` hands back the raw `TJSONValue` instead and `ExecuteAsJsonString` its
-text, while `Execute` covers a call made for its effect and a notification, `ExecuteBatch`
-a batch, and `ExecuteRaw` a payload put on the wire untouched - which is how the demo's
-**send raw** box still provokes `-32700` by hand.
+text, while `Execute` covers a call made for its effect, `Notify` a notification and
+`ExecuteBatch` a batch. The **send raw** box writes its text straight on the socket, past
+the client, which is how it still provokes `-32700` by hand.
 
 Three things the client does that hand-written code usually skips:
 
-- **The id is generated and verified.** `TJRPCClient.NewId` hands out interlocked integers,
-  and the id echoed by the server is compared with the one that went out - kind included,
-  so the string `"7"` never passes for the number `7`. A desynchronised stream is reported
-  instead of quietly returning the previous call's answer.
+- **The id is generated and matched.** `TJRPCClient.NewId` hands out interlocked integers,
+  and an answer goes only to the call whose id it echoes - kind included, so the string
+  `"7"` never passes for the number `7`. An answer nobody waits for is reported, and the
+  call that got none fails, instead of quietly returning the previous call's answer.
 - **An `error` member becomes an exception.** `EJRPCRemoteError` carries the server's own
   `Code`, `Message` and, in `ErrorData`, the `data` member - *lifted from the raw JSON*,
   because `TJRPCErrorDetails.Data` is a `TValue` that only survives numbers, strings and
-  booleans. A failure of the client itself (no transport, unreadable answer, id mismatch)
+  booleans. A failure of the client itself (no transport, unreadable answer, no answer)
   raises `EJRPCClientError` instead, so "the server said no" stays distinct from "the call
   never completed".
 - **The reply is classified before it is read.** Note that `TJRPCResponse.CreateFromJson`
@@ -353,6 +362,95 @@ Building by hand is otherwise unchanged: `AddNamedParam` / `AddPositionParam` bu
 `params` member (never both in one message - JSON-RPC 2.0 has no shape for that), while
 assigning `Request.Params` directly **takes ownership** of the `TJSONValue` you hand it,
 so never free that object yourself.
+
+### Three transports, one client
+
+The combo box at the top picks the transport before **Connect**. Everything below it - the
+buttons, the hooks, the log - is the same code whatever was picked: the client only knows
+an `IJRPCTransport`.
+
+| Transport | Class | How a message travels |
+|---|---|---|
+| Socket, one line per call | `TJRPCFuncTransport` | `Send` writes the request and reads the next line as its answer |
+| Socket kept open | `TJRPCPullTransport` (`TIndyLineTransport`) | `Send` only writes; a reader thread reads every line and the client matches it to its call by id |
+| In process, no server | `TJRPCLoopbackTransport` | a `TJRPCServer` in the client process runs each message on a task of its own |
+
+**One line per call** is the transport of [The client call](#the-client-call), with two
+additions that only `ExecuteAsync` makes necessary. The closures run on tasks of the
+thread pool, several at once, and one socket only takes one exchange at a time, so they
+take a lock. And a call that times out leaves its answer on the socket, where the next call
+would read it as its own, so the form drops the connection instead of carrying on out of
+step.
+
+**Socket kept open** derives from `TJRPCPullTransport`, which owns the reader thread and
+serializes the writes. `Client.Transport.pas` implements a blocking `Receive`, a `DoSend`
+and a `DoClose`, one JSON message per line:
+
+```pascal
+function TIndyLineTransport.Receive(out AText: string): Boolean;
+begin
+  while not Closed do
+  begin
+    AText := FClient.IOHandler.ReadLn(LF, RECEIVE_POLL_MS, FMaxLineLength, IndyTextEncoding_UTF8);
+    if FClient.IOHandler.ReadLnTimedout or (AText.Trim = '') then
+      Continue;                             // nothing yet, or a keepalive
+    Exit(True);
+  end;
+  Result := False;                          // DoClose was called
+end;
+```
+
+`DoClose` must unblock a pending `Receive`. Disconnecting an Indy socket from another
+thread while `ReadLn` runs on it is a race, so `Receive` reads with a short timeout and
+`DoClose` only raises a flag. The form disconnects the socket itself, and only after
+`TJRPCClient.Close` has joined the reader. A server that goes away ends `ReadLn` with
+`EIdConnClosedGracefully`, which `Receive` turns into `False`: the client fails the pending
+calls and fires `OnClose` with the reason.
+
+**In process** needs no `Server.exe` at all. The client project links
+`Server\Server.Protocol.Api.pas`, whose `initialization` registers `TBasicApi` with the
+global registry, and the form creates a `TJRPCServer` of its own. The answers come back in
+whatever order the tasks finish, exactly as over a real persistent channel.
+
+Whatever the transport, connecting is the same:
+
+```pascal
+FClient := TJRPCClient.Create(nil);
+FClient.Transport := CreateTransport(FKind);  // one of the three
+FClient.OnBeforeSend := ...;                  // the trace, '-->'
+FClient.OnAfterReceive := ...;                // the trace, '<--'
+FClient.OnError := ...;                       // every failure, once
+FClient.OnCallEnded := ...;                   // a call that stopped waiting
+FClient.OnNotification := ...;                // runs on the client's dispatch thread
+FClient.OnClose := ...;                       // with a TJRPCCloseInfo
+FClient.Open;
+```
+
+What the buttons show:
+
+- **Synchronous** - the five commands with `ExecuteAs<T>` and the timeout from the top bar:
+  `ExecuteAs<string>` for `ping`, `sys/time` and `echo`, `ExecuteAsJsonString` for the
+  object `sys/info` returns, `ExecuteAs<TArray<TDirEntry>>` for `dir/list`. Set a timeout
+  of 1 ms to watch one expire. Over the socket kept open the late answer still shows up in
+  the trace, and the client reports it as an answer nobody waits for; over one line per
+  call the connection is closed.
+- **Asynchronous** - **burst** sends N `echo` requests with `ExecuteAsync<string>` before
+  reading any answer, then waits for each call and reads its `Value`. Compare the time it
+  takes over the three transports.
+- **ExecuteBatch and Notify** - **batch** sends `ping`, `echo`, a method that does not
+  exist and a notification as one JSON array. The error comes back in the list rather than
+  as an exception, and the notification gets no answer at all. **notify ping** sends a
+  notification on its own: the server runs `ping` and answers nothing.
+- **Raw, past the client** - writes the text straight on the socket, which is how it still
+  provokes `-32700` by hand. Only over one line per call: with a reader thread the answer
+  would be the reader's.
+
+The threads the hooks run on depend on the transport: the caller's, a task of the pool,
+the reader, or the client's dispatch thread (`OnNotification`, `OnRequest`). The form never
+touches the VCL from them: it buffers the log lines and a timer writes them to the memo.
+
+The server never pushes, so `OnNotification` stays silent here. There is no `OnRequest`
+either: a request from the server would be answered `-32601` by the client itself.
 
 ## 6. Adding a command
 

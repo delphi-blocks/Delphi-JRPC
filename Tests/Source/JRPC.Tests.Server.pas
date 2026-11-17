@@ -57,6 +57,9 @@ type
     [Test] procedure TestProcessRequestObjectResultCamelCase;
     [Test] procedure TestProcessRequestContextInjection;
     [Test] procedure TestProcessRequestGarbageCollector;
+    [Test] procedure TestProcessRequestNotifierSendsBeforeTheAnswer;
+    [Test] procedure TestProcessRequestNotifierRequiredWithoutSinkFails;
+    [Test] procedure TestProcessRequestNotifierOptionalIsNilWithoutSink;
     [Test] procedure TestProcessRequestCustomSeparator;
     [Test] procedure TestProcessRequestFlatMethod;
     [Test] procedure TestProcessRequestFlatMethodWithParams;
@@ -897,6 +900,85 @@ begin
     Assert.IsTrue(TContextApi.Destroyed,
       'the API instance must be freed when the request completes');
   finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestNotifierSendsBeforeTheAnswer;
+var
+  LServer: TJRPCServer;
+  LSent: TStringList;
+  LResponse: string;
+  LTick: TJSONObject;
+  LIndex: Integer;
+begin
+  LServer := TJRPCServer.Create(nil);
+  LSent := TStringList.Create;
+  try
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":"notify/count","params":{"count":3}}',
+      procedure (const AText: string)
+      begin
+        LSent.Add(AText);
+      end);
+
+    Assert.AreEqual('done', GetResultValue(LResponse));
+    Assert.AreEqual(3, LSent.Count, 'one message per notification, sent before the answer');
+    for LIndex := 0 to LSent.Count - 1 do
+    begin
+      LTick := ParseObject(LSent[LIndex]);
+      try
+        Assert.IsNotNull(LTick, LSent[LIndex]);
+        Assert.AreEqual('notify/tick', LTick.GetValue<string>('method'));
+        Assert.AreEqual(LIndex + 1, LTick.GetValue<Integer>('params.tick'));
+        Assert.IsNull(LTick.GetValue('id'), 'a notification carries no id');
+      finally
+        LTick.Free;
+      end;
+    end;
+  finally
+    LSent.Free;
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestNotifierRequiredWithoutSinkFails;
+var
+  LServer: TJRPCServer;
+  LResponse: string;
+begin
+  LServer := TJRPCServer.Create(nil);
+  try
+    // No sink: the context has no notifier, and the [Context] field that
+    // needs one cannot be filled - an error answer, not a crash in the method.
+    LResponse := LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":"notify/count","params":{"count":3}}');
+    Assert.AreEqual(JRPC_INTERNAL_ERROR, ErrorCodeOf(LResponse), LResponse);
+  finally
+    LServer.Free;
+  end;
+end;
+
+procedure TJRPCServerTest.TestProcessRequestNotifierOptionalIsNilWithoutSink;
+var
+  LServer: TJRPCServer;
+  LSent: TStringList;
+begin
+  LServer := TJRPCServer.Create(nil);
+  LSent := TStringList.Create;
+  try
+    Assert.AreEqual('none', GetResultValue(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":1,"method":"notifyopt/check"}')));
+
+    Assert.AreEqual('notifier', GetResultValue(LServer.ProcessRequest(
+      '{"jsonrpc":"2.0","id":2,"method":"notifyopt/check"}',
+      procedure (const AText: string)
+      begin
+        LSent.Add(AText);
+      end)));
+    Assert.AreEqual(1, LSent.Count);
+  finally
+    LSent.Free;
     LServer.Free;
   end;
 end;

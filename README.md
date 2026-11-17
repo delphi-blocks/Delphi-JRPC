@@ -16,10 +16,11 @@ A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI 
 - **Flexible Routing**: `TRouteMatcher` for URI-style template matching and parameter extraction.
 - **Flexible Naming**: `path` + separator + `method`, a custom separator, or *flat* classes (`[JRPCPath('')]`) whose methods declare the full name (`tools/call`).
 - **High Performance**: powered by [Neon](https://github.com/paolo-rossi/delphi-neon), with built-in **TStopwatch [PERF] instrumentation** in the invoker and the server.
-- **Transport Agnostic**: integrate into any transport layer (HTTP, WebSockets, named pipes, STDIO) — on both sides: `TJRPCServer` takes a string and returns one, `TJRPCClient` is handed a function that does the same, or a streaming transport when the answer arrives as several messages.
+- **Transport Agnostic**: integrate into any transport layer (HTTP, WebSockets, named pipes, STDIO) — on both sides: `TJRPCServer` takes a string and returns one, `TJRPCClient` is handed an `IJRPCTransport`, as small as one function.
 - **Typed Client**: call a remote method and get a Delphi value back — `ExecuteAs<T>` deserializes `result` through Neon, and an `error` member arrives as an exception.
-- **Streaming Answers**: a transport can deliver notifications before the response (`OnNotification`) and long-lived streams of frames (`ExecuteStream`), without the library linking any transport itself.
-- **Bidirectional Connection**: `TJRPCConnection` keeps calls in flight by id over one stream, with timeouts, cancellation, notifications and peer requests (`OnRequest`/`Respond`).
+- **One Client, Any Channel**: the same `TJRPCClient` over HTTP, a socket or stdio: calls in flight matched by id (`ExecuteAsync`), timeouts and cancellation, notifications, and requests from the peer answered by a handler or a local `TJRPCServer`.
+- **Streaming Answers**: over HTTP, the notifications that arrive on the answer stream of a call (an SSE body) reach that call, and a long-lived stream (a subscription) is just a call that stays open.
+- **Notifications from a running method**: a server method sends progress to its client before answering, through a `TJRPCNotifier` injected with `[Context]`.
 - **Batch Processing**: multiple requests in a single batch.
 - **Notification Support**: full JSON-RPC notification pattern.
 
@@ -30,9 +31,9 @@ A modern, attribute-driven **JSON-RPC 2.0** framework for Delphi, built on RTTI 
 | **JRPC.Core** | Base protocol types, message classes (`Request`, `Response`, `Notification`, `Error`), error codes, serialization logic and the class registry (`TJRPCRegistry`). |
 | **JRPC.Invoker** | Maps JSON-RPC requests to Delphi method calls using RTTI and attributes. |
 | **JRPC.Classes** | Supporting utilities: garbage collection, context management, route matching. |
-| **JRPC.Server** | Transport-agnostic server component (`TJRPCServer`) that parses, dispatches and answers requests, including batches. |
-| **JRPC.Client** | Transport-agnostic client component (`TJRPCClient`): builds requests, correlates answers by id, deserializes `result` into a Delphi type and raises the peer's `error`. |
-| **JRPC.Connection** | Bidirectional endpoint (`TJRPCConnection`) over a blocking message transport: pending calls by id, `CallAsync`/cancel, timeouts, notifications and peer requests. |
+| **JRPC.Server** | Transport-agnostic server component (`TJRPCServer`) that parses, dispatches and answers requests, including batches, and the `TJRPCNotifier` a method uses to notify its client while it runs. |
+| **JRPC.Transport** | The transport contract (`IJRPCTransport`), the base class for persistent streams (`TJRPCPullTransport`), a transport made of closures (`TJRPCFuncTransport`) and an asynchronous in-process loopback (`TJRPCLoopbackTransport`). |
+| **JRPC.Client** | Transport-agnostic client component (`TJRPCClient`): builds requests, keeps the calls in flight and matches the answers by id, deserializes `result` into a Delphi type, raises the peer's `error`, and serves what the peer sends on its own. |
 
 ## 🛠️ Quick Start
 
@@ -82,15 +83,16 @@ begin
 end;
 ```
 
-``ProcessRequest`` answers a single request with a single Response object, a batch with an array of Response objects, and a notification with an empty string (per the spec, a server never answers a notification).
+`ProcessRequest` answers a single request with a single Response object, a batch with an array of Response objects, and a notification with an empty string (per the spec, a server never answers a notification).
 
 ### 3. Call it from a client
 
-`TJRPCClient` is the mirror image: it links no transport either, so you hand it the one function that gets a payload to the peer and the answer back.
+`TJRPCClient` is the mirror image, and one class serves every channel: HTTP, a socket, a child process over stdio, an in-process server. It links no transport either: you hand it an `IJRPCTransport`, and the transport is the only thing that changes from one channel to another. The library ships the generic ones (a transport made of closures, an in-process loopback, a base class for persistent streams); a network or process transport is written on top of them with whatever library is at hand (see Demos/CommandsTCP for an Indy socket).
 
 ```delphi
 uses
   JRPC.Core,
+  JRPC.Transport,
   JRPC.Client;
 
 var
@@ -98,13 +100,16 @@ var
 begin
   LClient := TJRPCClient.Create(nil);
   try
-    LClient.OnTransport :=
-      function(const ARequest: string): string
+    // The quickest transport: a function that sends a payload and returns the
+    // answer. A real HTTP client goes here - or LServer.ProcessRequest, to
+    // loop back in-process.
+    LClient.Transport := TJRPCFuncTransport.Create(
+      function (const AText: string): string
       begin
-        Result := MySocket.SendAndReadLine(ARequest);   // or LServer.ProcessRequest, to loop back
-      end;
+        Result := MyHttp.Post(MyUrl, AText);
+      end);
 
-    // The id is generated, sent, and checked against the one echoed back.
+    // The id is generated, sent, and matched with the answer.
     WriteLn(LClient.ExecuteAs<Integer>(
       TJRPCRequestBuilder.New
         .SetMethod('math/sum')
@@ -116,105 +121,97 @@ begin
 end;
 ```
 
-A failure the peer reports arrives as `EJRPCRemoteError`, carrying its `Code`, `Message` and structured `ErrorData`; a failure of the call itself (no transport, unreadable answer, an id that does not match) arrives as `EJRPCClientError`. Assign `OnError` to log every failure in one place; it reports and the exception carries on as usual.
+A failure the peer reports arrives as `EJRPCRemoteError`, carrying its `Code`, `Message` and structured `ErrorData`; a failure of the call itself (no transport, an unreadable answer, no answer at all, a timeout) arrives as `EJRPCClientError`. Assign `OnError` to log every failure in one place. By default the exception carries on as usual; the handler can change that through its `var AAction` parameter: `Raise` (the default), `Abort` (an `EAbort` is raised instead, which stops the flow silently) or `Ignore` (nothing is raised and the call returns an empty result: `Default(T)`, `nil`, `''` or an empty list). For an asynchronous call the choice applies when `Value` is read. `OnError` also sees the failures of the channel itself that no caller is waiting for; for those the action has no effect.
 
-`ExecuteAsJSONValue` returns the raw `TJSONValue` instead and `ExecuteAsJsonString` its text, while `Execute` covers a call made for its effect and a notification, `ExecuteBatch` a batch, and `ExecuteRaw` a payload put on the wire untouched.
+```pascal
+FClient.OnError :=
+  procedure (E: Exception; var AAction: TJRPCErrorAction)
+  begin
+    Log(E.Message);
+    if E is EJRPCRemoteError then
+      AAction := TJRPCErrorAction.Abort;
+  end;
+```
 
-`TJRPCRequestBuilder` is interfaced, so the request is freed with it and no call site needs a `try/finally`. `Build` only *lends* the request out — the builder keeps ownership — so anything that adopts a request, `TJRPCMessages` in a batch above all, gets a plain `TJRPCRequest.Create` instead.
+`ExecuteAsJSONValue` returns the raw `TJSONValue` instead and `ExecuteAsJsonString` its text, while `Execute` covers a call made for its effect, `Notify` a notification and `ExecuteBatch` a batch. Every synchronous call takes an optional timeout; `DefaultTimeout` applies when it is 0.
 
-Because the transport is just a function, a client can be pointed straight at a `TJRPCServer` in the same process — which is how the suite tests it, with no socket involved.
+`TJRPCRequestBuilder` is interfaced, so the request is freed with it and no call site needs a `try/finally`. `Build` only *lends* the request out - the builder keeps ownership - so anything that adopts a request, `TJRPCMessages` in a batch above all, gets a plain `TJRPCRequest.Create` instead.
 
-#### Streaming answers
+#### Calls in flight
 
-A JSON-RPC answer is normally one message. Some transports (an SSE body, a WebSocket, a pipe) can carry several: a peer may send progress notifications before the response, and a subscription stream may never send a response at all.
-
-A transport that also implements `IJRPCStreamingTransport` is used in streaming mode automatically. Each frame is parsed; notifications go to `OnNotification`; the response resolves the call.
+`ExecuteAsync<T>` returns at once with an `IJRPCCall<T>`; `Value` waits and returns the result (or raises), `Cancel` gives up on it. The client keeps a map of the calls in flight and matches every answer by id, so calls overlap and may be answered in any order.
 
 ```delphi
-LClient.OnNotification :=
-  procedure(const ANotification: TJRPCNotification)
-  begin
-    // progress, log, ... The object is valid only for the duration of the call.
+var
+  LInfo: IJRPCCall<TSysInfo>;
+  LFiles: IJRPCCall<TArray<TDirEntry>>;
+begin
+  LInfo := LClient.ExecuteAsync<TSysInfo>(TJRPCRequestBuilder.New.SetMethod('sys/info'));
+  LFiles := LClient.ExecuteAsync<TArray<TDirEntry>>(
+    TJRPCRequestBuilder.New.SetMethod('dir/list').AddNamedParam('path', 'C:\'));
+
+  if not LFiles.Wait(5000) then
+    LFiles.Cancel                      // OnCallEnded fires: tell the peer, if it cares
+  else
+    ShowFiles(LFiles.Value);
+
+  ShowInfo(LInfo.Value);
+end;
+```
+
+#### Transports: two shapes
+
+A transport says which shape it has through `RoundTrip`:
+
+- **`RoundTrip = True`**: the answer is the outcome of the write (HTTP, a function over `ProcessRequest`). `Send` returns once the exchange is over, and hands every message of the answer to the client before returning: one body, or several SSE events with notifications before the response. No thread is involved; `ExecuteAsync` runs `Send` on a task of the thread pool so that calls overlap. `TJRPCFuncTransport` is one, and its `CreateFramed` constructor serves an answer made of several messages.
+- **`RoundTrip = False`**: a persistent stream (stdio, a socket, a pipe). `Send` writes and returns, and whatever comes in is read on a thread of the transport, at any time. Derive from `TJRPCPullTransport` and implement three methods - `Receive` (blocking), `DoSend` and `DoClose`, which must unblock `Receive`; the reader thread and the serialized writes come with the base class. `TJRPCLoopbackTransport` is one, over a `TJRPCServer` that runs each request on a task: the answers come back out of order, as on a real channel.
+
+```delphi
+type
+  TMyPipeTransport = class(TJRPCPullTransport)
+  protected
+    function Receive(out AText: string): Boolean; override;   // False at EOF
+    procedure DoSend(const AText: string); override;
+    procedure DoClose; override;
   end;
+```
 
-// An ordinary call: the response still comes back, the notifications do not
-// get in the way.
-LValue := LClient.ExecuteAs<Integer>(LRequest);
+A transport that can stop reading the answer to one request (a long-lived subscription) also implements `IJRPCAbortableTransport`; the client calls it when such a call times out or is cancelled. None of the transports in the library implements it: a cancelled call over `TJRPCFuncTransport` stops waiting at once, but the function keeps running until the peer ends the answer.
 
-// A long-lived stream: frames are raw JSON, in arrival order, on a thread of
-// the client's own.
-LStream := LClient.ExecuteStream(
-  TJRPCRequestBuilder.New.SetMethod('subscriptions/listen'),
-  function(const AJSON: string): Boolean
+#### What the peer sends on its own
+
+Notifications go to `OnNotification`. Requests go to `OnRequest`, or to a local `TJRPCServer` assigned to `Server` (attributes, `[Context]` and errors work as on the server side); without either they are answered `-32601`. A request is answered through an `IJRPCReply`, from any thread, even after the handler returned; a reply released without an answer answers `-32603`, so the peer is never left waiting.
+
+```delphi
+LClient.OnRequest :=
+  procedure (const ARequest: TJRPCRequest; const AReply: IJRPCReply)
+  var
+    LReply: IJRPCReply;
   begin
-    HandleFrame(AJSON);
-    Result := True;                    // False stops the read
+    LReply := AReply;
+    TTask.Run(
+      procedure
+      begin
+        LReply.Result(DoTheSlowThing);   // a TJSONValue, or any value Neon serializes
+      end);
+  end;
+```
+
+These handlers run on a dispatch thread of the client (`DispatchMode = Queue`, the default), one at a time, in arrival order: a handler can call the client synchronously, and a slow one never delays the answers to the calls in flight, which complete as soon as they arrive. `DispatchMode = Direct` runs them on the thread that received the message instead.
+
+Since answers do not wait in that queue, with `Queue` a call can complete - and `Value` return - before `OnNotification` has run for a notification the peer sent ahead of the answer. When that order matters (a progress bar that must reach its end before the result shows), use `Direct`, as Demos/ProgressTCP does; it is safe as long as no handler calls the peer and waits.
+
+A notification that arrives on the answer stream of a call (an SSE body) goes to that call when `ExecuteAsync` was given a handler for it, which is how progress reaches the right caller. A persistent channel (a socket, stdio) does not tie a notification to a call: there it goes to `OnNotification`.
+
+```delphi
+LCall := LClient.ExecuteAsync<TToolResult>(LRequest,
+  procedure (const ANotification: TJRPCNotification)
+  begin
+    UpdateProgressBar(ANotification.Params);
   end);
-try
-  LStream.Wait(5000);
-finally
-  LStream.Close;                       // asks an IJRPCAbortableTransport to abort
-end;
 ```
 
-`IJRPCStream.Close` is idempotent and unblocks the read when the transport implements `IJRPCAbortableTransport`; `Wait` blocks until the read loop ends and `Completed` says whether it has. The client must outlive its streams: they deliver through its `OnAfterReceive`/`OnError`.
-
-`NeonConfig` lets a client deserialize results with a configuration other than the default camel-cased one — the types of a protocol that spells its members differently, or one with custom serializers.
-
-#### Connections
-
-When one stream carries several calls, replies, notifications and peer requests, use `TJRPCConnection` instead of the client. The transport is a blocking `Receive` plus a `Send`; the connection owns the reader thread and matches replies to pending calls by id.
-
-```delphi
-uses
-  JRPC.Connection;
-
-LConnection := TJRPCConnection.Create(LTransport);   // IJRPCMessageTransport
-try
-  LConnection.OnNotification :=
-    procedure(const ANotification: TJRPCNotification)
-    begin
-      // Runs on the reader thread; do not Call synchronously from here.
-    end;
-
-  LConnection.OnRequest :=
-    procedure(const ARequest: TJRPCRequest)
-    var
-      LResponse: TJRPCResponse;
-    begin
-      LResponse := TJRPCResponse.Create;
-      try
-        LResponse.Id := ARequest.Id;
-        LResponse.Result := TJSONString.Create('pong');
-        LConnection.Respond(LResponse);
-      finally
-        LResponse.Free;
-      end;
-    end;
-
-  LConnection.Open;
-
-  // Blocking, with a timeout (0 waits forever); raises EJRPCRemoteError when
-  // the peer answers with an error.
-  LResponse := LConnection.Call(LRequest, 5000);
-  try
-    Use(LResponse.Result);
-  finally
-    LResponse.Free;
-  end;
-
-  // Or without blocking:
-  LCall := LConnection.CallAsync(LRequest);
-  if not LCall.Wait(5000) then
-    LCall.Cancel;
-finally
-  LConnection.Free;                                  // closes and joins the reader
-end;
-```
-
-`CallAsync` returns an `IJRPCCall`: `Wait`, `Completed`, `Cancel`, and `TakeResponse`/`TakeError`, which transfer ownership of the reply exactly once. `Close` fails every pending call with `EJRPCClientError`, closes the transport and joins the reader; `OnClose` fires once, whether the connection was closed locally or by the peer. Peer requests are answered with `Respond`, and notifications with `Notify`.
-
-A JSON-RPC batch is not fanned out by the connection: one message per frame, and a batch answer is reported to `OnError`.
+`Close` fails every call in flight with `EJRPCClientError` and closes the transport; `OnClose` fires once, with a `TJRPCCloseInfo` saying who ended it and why. A closed client opens again once a new `Transport` is assigned. `NeonConfig` lets a client deserialize results with a configuration other than the default camel-cased one.
 
 ### 4. Method naming
 
@@ -270,19 +267,46 @@ begin
 end;
 ```
 
+### Notifications while a method runs
+
+A transport with a channel back to the client (a socket, stdio) can pass `ProcessRequest` a sink: TJRPCServer then puts a `TJRPCNotifier` in the context, and a method sends notifications through it while it runs - progress, log lines - ahead of its answer.
+
+```delphi
+type
+  TJobApi = class
+  private
+    [Context] FNotifier: TJRPCNotifier;
+  public
+    [JRPCMethod('job/run')]
+    function Run([JRPCParam('steps')] ASteps: Integer): string;
+  end;
+
+// In the method: build a TJRPCNotification and FNotifier.Send(it).
+
+// In the transport, on the connection's thread:
+LResponse := FJRPCServer.ProcessRequest(LLine,
+  procedure (const AText: string)
+  begin
+    AContext.Connection.IOHandler.WriteLn(AText, IndyTextEncoding_UTF8);
+  end);
+```
+
+Without a sink there is no notifier: a plain `[Context]` field makes the call fail with `-32603` before the method runs, while `[Context([TContextOption.Optional])]` leaves the field nil, for a method that can do without. The notifier lives as long as the request: never keep it, nor use it from a thread that outlives the method.
+
 ## 🎯 Demo
 
-Demo/JRPCDemo is a console test runner that exercises 
-the library end to end: named/positional parameters, notifications, batches (including batches with invalid elements), all standard error codes, object results with default and per-class Neon casing, whole-params objects (`[JRPCParams]`), enum parameters, null-id round trips, context injection, garbage collection and custom separators. It exits with a non-zero code when any assertion fails, and it registers a Logify console adapter at startup so the [PERF] timing lines are printed between every request/response pair.
+Demos/CommandsTCP is a server and a client, two VCL executables over TCP, one JSON message per line. The server exposes five commands on a `TJRPCServer`; the client calls them with one `TJRPCClient` over the transport picked before connecting - a socket opened for each call (`TJRPCFuncTransport`), a socket kept open (`TIndyLineTransport`, a `TJRPCPullTransport` on Indy) or an in-process server (`TJRPCLoopbackTransport`) - and the same buttons show `ExecuteAs<T>`, `ExecuteAsJsonString`, `ExecuteAsync`, `ExecuteBatch` and `Notify` on all three. Its README describes the wire protocol.
+
+Demos/ProgressTCP shows a call that talks back while it runs: a server and a client, two executables over TCP, one JSON message per line. The server's `job/run` is a plain `[JRPCMethod]` on a `TJRPCServer`; after every step it sends a `job/progress` notification through the `TJRPCNotifier` injected in its `[Context]` field, which writes on the connection of the request being served, ahead of the answer. The client starts the call with `ExecuteAsync`, moves a progress bar with each notification as it arrives, and shows the result once the call completes. It reuses the persistent line transport of CommandsTCP (`Client.Transport.pas`).
+
+Each demo has a group project (`CommandsTCP.groupproj`, `ProgressTCP.groupproj`); the executables land in the demo's `Bin` folder.
+
+## 🧪 Tests
+
+`Tests/JRPC.Tests.Framework.dproj` is the DUnitX suite: protocol messages, the server, the invoker, the client over a function transport and over a persistent channel. `BuildTests.bat` builds and runs it; it needs the `DUnitX` environment variable set to the DUnitX Source folder.
 
 ```
-BuildDemo.bat
-```
-
-Demo/JRPCExample showcases a realistic example API - a notes CRUD service over an in-memory store (object params/results, array results, enums), plus custom separators, per-class Neon casing and context injection - as a guided showcase followed by an interactive prompt where any request can be typed and answered:
-
-```
-BuildExample.bat
+BuildTests.bat
 ```
 
 ## ⚙️ Requirements

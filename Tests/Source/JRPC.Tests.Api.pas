@@ -19,7 +19,8 @@ uses
   Neon.Core.Persistence,
 
   JRPC.Classes,
-  JRPC.Core;
+  JRPC.Core,
+  JRPC.Server;
 
 type
   /// <summary>An operation selector, serialized by name as a JSON string.</summary>
@@ -116,6 +117,35 @@ type
 
     [JRPCMethod('method')]
     function GetRequestMethod: string;
+  end;
+
+  /// <summary>
+  ///   Sends notifications while it runs, through a notifier it cannot do
+  ///   without.
+  /// </summary>
+  [JRPCPath('notify')]
+  TNotifyApi = class
+  private
+    [Context] FNotifier: TJRPCNotifier;
+  public
+    /// <summary>
+    ///   Sends ACount "notify/tick" notifications, with the tick number, then
+    ///   answers "done".
+    /// </summary>
+    [JRPCMethod('count')]
+    function Count([JRPCParam('count')] ACount: Integer): string;
+  end;
+
+  /// <summary>
+  ///   Asks for the notifier as optional, and tells whether it got one.
+  /// </summary>
+  [JRPCPath('notifyopt')]
+  TOptionalNotifyApi = class
+  private
+    [Context([TContextOption.Optional])] FNotifier: TJRPCNotifier;
+  public
+    [JRPCMethod('check')]
+    function Check: string;
   end;
 
   /// <summary>
@@ -242,6 +272,40 @@ begin
   LScoped.Add('freed automatically with the request');
 end;
 
+{ TNotifyApi }
+
+function TNotifyApi.Count(ACount: Integer): string;
+var
+  LIndex: Integer;
+  LTick: TJRPCNotification;
+begin
+  for LIndex := 1 to ACount do
+  begin
+    LTick := TJRPCNotification.Create;
+    try
+      LTick.Method := 'notify/tick';
+      LTick.AddNamedParam('tick', LIndex);
+      FNotifier.Send(LTick);
+    finally
+      LTick.Free;
+    end;
+  end;
+  Result := 'done';
+end;
+
+{ TOptionalNotifyApi }
+
+function TOptionalNotifyApi.Check: string;
+begin
+  if Assigned(FNotifier) then
+  begin
+    FNotifier.Send('notifyopt/hello');
+    Result := 'notifier';
+  end
+  else
+    Result := 'none';
+end;
+
 { TFlatApi }
 
 function TFlatApi.Ping: string;
@@ -284,6 +348,8 @@ initialization
   TJRPCRegistry.Instance.RegisterClass(TCamelApi, TNeonConfiguration.Camel);
   TJRPCRegistry.Instance.RegisterClass(TGreetApi);
   TJRPCRegistry.Instance.RegisterClass(TContextApi);
+  TJRPCRegistry.Instance.RegisterClass(TNotifyApi);
+  TJRPCRegistry.Instance.RegisterClass(TOptionalNotifyApi);
   TJRPCRegistry.Instance.RegisterClass(TCustomSeparatorApi);
   TJRPCRegistry.Instance.RegisterClass(TFlatApi);
   TJRPCRegistry.Instance.RegisterClass(TBareApi);
